@@ -122,4 +122,4 @@ This runner is designed to work alongside the following repos, which are install
 
 - **[METIS_Pipeline](https://github.com/AstarVienna/METIS_Pipeline)** — the core Python/C pipeline, EDPS workflows, and PyEsoRex recipes
 - **[METIS_Simulations](https://github.com/AstarVienna/METIS_Simulations)** — ScopeSim scripts that generate synthetic FITS observations for each observing mode
-- **[metis-meta-package](https://github.com/AstarVienna/metis-meta-package)** — meta-installer that sets up `uv`, EDPS, PyEsoRex, and all dependencies in one step
+- **[metis-meta-package](https://github.com/eiseleb47/metis-meta-package)** — meta-installer that sets up `uv`, EDPS, PyEsoRex, and all dependencies in one step
