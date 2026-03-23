@@ -5,11 +5,23 @@ run_metis.py — METIS observation simulation + pipeline wrapper
 Reads YAML observation-block files, uses ScopeSim to generate synthetic
 FITS frames, then runs the matching EDPS workflow on those frames.
 
-Prerequisite: the metis-meta-package bootstrap has been run on this machine.
-All commands are executed via uv (the package manager installed by bootstrap.sh).
-
 Usage:
     python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
+
+Three execution modes are supported via --runner (or METIS_RUNNER env var):
+
+  metapkg (default)
+      Uses uv + metis-meta-package. Requires bootstrap.sh to have been run;
+      looks for ~/metis-meta-package and ~/METIS_Simulations.
+
+  native
+      Calls edps / python directly from PATH. Use this when running inside
+      a Docker/Podman container or on a bare-metal install.
+
+  docker / podman
+      Wraps every command with ``docker exec`` / ``podman exec`` into a named
+      container. Requires --container NAME (or METIS_CONTAINER env var).
+      The output directory must be bind-mounted into the container.
 
 The workflow (lm_img / n_img / ifu / lm_lss / n_lss / …) is inferred
 automatically from the DPR.TECH / mode values in the YAML blocks.
@@ -332,33 +344,106 @@ def infer_edps_target(workflow, data_tags, has_science):
 
 
 # ---------------------------------------------------------------------------
-# Simulation driver script (written to a temp file, then executed)
+# Simulation driver script builder
 # ---------------------------------------------------------------------------
 
-_SIM_SCRIPT = """\
-import sys
-sys.path.insert(0, "python")
+def _build_sim_script(out_dir, small, do_calib, n_cores, yaml_list,
+                      inst_pkgs_path=None):
+    """Return the simulation driver script as a string.
 
-# Override ScopeSim's default relative inst_pkgs path so it resolves to the
-# copy bundled inside metis-meta-package regardless of the working directory.
-import scopesim as sim
-sim.rc.__config__["!SIM.file.local_packages_path"] = {inst_pkgs_path!r}
+    When *inst_pkgs_path* is given (metapkg runner only) the script overrides
+    ScopeSim's local_packages_path so it resolves to the copy bundled inside
+    metis-meta-package regardless of working directory.
+    """
+    lines = [
+        "import sys",
+        'sys.path.insert(0, "python")',
+        "",
+        "import scopesim as sim",
+    ]
+    if inst_pkgs_path is not None:
+        lines.append(
+            "# Override ScopeSim's inst_pkgs path to the meta-package copy."
+        )
+        lines.append(
+            f'sim.rc.__config__["!SIM.file.local_packages_path"] = {inst_pkgs_path!r}'
+        )
+    lines += [
+        "",
+        "import runSimulationBlock as rsb",
+        "",
+        "params = dict(",
+        f"    outputDir = {out_dir!r},",
+        f"    small     = {small!r},",
+        "    doStatic  = False,",
+        f"    doCalib   = {do_calib!r},",
+        "    sequence  = False,",
+        "    startMJD  = None,",
+        "    calibFile = None,",
+        f"    nCores    = {n_cores!r},",
+        "    testRun   = False,",
+        ")",
+        f"rsb.runSimulationBlock({yaml_list!r}, params)",
+    ]
+    return "\n".join(lines) + "\n"
 
-import runSimulationBlock as rsb
 
-params = dict(
-    outputDir = {out_dir!r},
-    small     = {small!r},
-    doStatic  = False,
-    doCalib   = {do_calib!r},
-    sequence  = False,
-    startMJD  = None,
-    calibFile = None,
-    nCores    = {n_cores!r},
-    testRun   = False,
-)
-rsb.runSimulationBlock({yaml_list!r}, params)
-"""
+# ---------------------------------------------------------------------------
+# Runner-aware subprocess helpers
+# ---------------------------------------------------------------------------
+
+def _run_simulation(runner, container, sim_code, sims_cwd, meta_pkg=None):
+    """Execute the simulation script in the appropriate environment.
+
+    - metapkg : wrap with ``uv run --project <meta_pkg>``
+    - native  : call ``python`` directly (tools must be on PATH)
+    - docker/podman : pipe script via stdin into ``<runtime> exec -i -w <cwd>
+                      <container> python -``
+
+    Returns the subprocess exit code.
+    """
+    if runner in ("docker", "podman"):
+        return subprocess.run(
+            [runner, "exec", "-i", "-w", str(sims_cwd), container,
+             "python", "-"],
+            input=sim_code.encode(),
+        ).returncode
+
+    # For metapkg and native, write to a temp file and run it.
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix="_run_sim.py",
+                                     delete=False)
+    tmp.write(sim_code)
+    tmp.close()
+    try:
+        if runner == "metapkg":
+            cmd = [
+                "uv", "run",
+                "--project", str(meta_pkg),
+                "--env-file", str(meta_pkg / ".env"),
+                "python", tmp.name,
+            ]
+            cwd = str(sims_cwd)
+        else:  # native
+            cmd = ["python", tmp.name]
+            cwd = str(sims_cwd)
+        return subprocess.run(cmd, cwd=cwd).returncode
+    finally:
+        os.unlink(tmp.name)
+
+
+def _edps_base_cmd(runner, container, edps_port, meta_pkg=None):
+    """Return the command prefix list up to and including the edps port flag."""
+    base = ["edps", "-P", str(edps_port)]
+    if runner == "metapkg":
+        return ["uv", "run", "--env-file", str(meta_pkg / ".env")] + base
+    if runner in ("docker", "podman"):
+        return [runner, "exec", container] + base
+    return base  # native
+
+
+def _edps_cwd(runner, meta_pkg=None):
+    """Return the working directory for EDPS subprocess calls, or None."""
+    return str(meta_pkg) if runner == "metapkg" else None
 
 
 # ---------------------------------------------------------------------------
@@ -399,14 +484,31 @@ def parse_args():
         help="Run simulations only; skip EDPS pipeline",
     )
     p.add_argument(
+        "--runner",
+        choices=["metapkg", "native", "docker", "podman"],
+        default=os.environ.get("METIS_RUNNER", "metapkg"),
+        help="Execution mode: metapkg (default) uses uv + metis-meta-package; "
+             "native calls tools directly from PATH (bare-metal or inside a "
+             "container); docker/podman exec commands into a running container "
+             "(env: METIS_RUNNER)",
+    )
+    p.add_argument(
+        "--container", metavar="NAME",
+        default=os.environ.get("METIS_CONTAINER"),
+        help="Container name or ID for --runner=docker/podman "
+             "(env: METIS_CONTAINER)",
+    )
+    p.add_argument(
         "--meta-pkg", metavar="DIR",
         help="Path to the metis-meta-package directory "
-             "[default: ~/metis-meta-package]",
+             "[default: ~/metis-meta-package] (metapkg runner only)",
     )
     p.add_argument(
         "--simulations-dir", metavar="DIR",
-        help="Path to the METIS_Simulations repository "
-             "[default: ~/METIS_Simulations]",
+        help="Path to the METIS_Simulations repository. For docker/podman "
+             "runners this must be the path *inside* the container "
+             "[default: ~/METIS_Simulations for native/metapkg, "
+             "/home/metis/METIS_Simulations for docker/podman]",
     )
     return p.parse_args()
 
@@ -417,9 +519,16 @@ def parse_args():
 
 def main():
     args = parse_args()
+    runner = args.runner
 
     if args.no_sim and args.no_pipeline:
         sys.exit("Error: --no-sim and --no-pipeline both set; nothing to do.")
+
+    if runner in ("docker", "podman") and not args.container:
+        sys.exit(
+            f"Error: --container NAME is required when --runner={runner}\n"
+            f"You can also set the METIS_CONTAINER environment variable."
+        )
 
     # Resolve and validate YAML paths
     yaml_files = []
@@ -429,24 +538,33 @@ def main():
             sys.exit(f"Error: YAML file not found: {p}")
         yaml_files.append(p)
 
-    # Locate metis-meta-package
-    meta_pkg = Path(args.meta_pkg).resolve() if args.meta_pkg \
-               else Path.home() / "metis-meta-package"
-    if not (meta_pkg / ".env").exists():
-        sys.exit(
-            f"Error: metis-meta-package not found at {meta_pkg}\n"
-            "Run metis-meta-package/bootstrap.sh first, or pass --meta-pkg."
-        )
+    # Locate metis-meta-package (metapkg runner only)
+    meta_pkg = None
+    if runner == "metapkg":
+        meta_pkg = Path(args.meta_pkg).resolve() if args.meta_pkg \
+                   else Path.home() / "metis-meta-package"
+        if not (meta_pkg / ".env").exists():
+            sys.exit(
+                f"Error: metis-meta-package not found at {meta_pkg}\n"
+                "Run metis-meta-package/bootstrap.sh first, or pass --meta-pkg."
+            )
 
     # Locate METIS_Simulations
-    sims_root = Path(args.simulations_dir).resolve() if args.simulations_dir \
-                else Path.home() / "METIS_Simulations"
-    sims_cwd = sims_root / "Simulations"
-    if not sims_cwd.is_dir():
-        sys.exit(
-            f"Error: METIS_Simulations not found at {sims_root}\n"
-            "Pass --simulations-dir if it is installed elsewhere."
-        )
+    # For docker/podman the path is resolved inside the container, so we skip
+    # the existence check and default to the upstream image layout.
+    if runner in ("docker", "podman"):
+        sims_root = Path(args.simulations_dir) if args.simulations_dir \
+                    else Path("/home/metis/METIS_Simulations")
+        sims_cwd = sims_root / "Simulations"
+    else:
+        sims_root = Path(args.simulations_dir).resolve() if args.simulations_dir \
+                    else Path.home() / "METIS_Simulations"
+        sims_cwd = sims_root / "Simulations"
+        if not sims_cwd.is_dir():
+            sys.exit(
+                f"Error: METIS_Simulations not found at {sims_root}\n"
+                "Pass --simulations-dir if it is installed elsewhere."
+            )
 
     # Infer workflow and collect data tags from YAML
     print("Analysing YAML file(s) …")
@@ -455,13 +573,15 @@ def main():
     except ValueError as exc:
         sys.exit(f"Error: {exc}")
 
+    print(f"  Runner    : {runner}"
+          + (f" (container: {args.container})" if args.container else ""))
     print(f"  Workflow  : {workflow}")
     print(f"  Data tags : {sorted(yaml_tags) or '(none found)'}")
 
     # Create output directories
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-    output_root   = Path(args.output).resolve() if args.output \
-                    else Path.cwd() / "output" / ts
+    output_root = Path(args.output).resolve() if args.output \
+                  else Path.cwd() / "output" / ts
     sim_out  = output_root / "sim"
     pipe_out = output_root / "pipeline"
     sim_out.mkdir(parents=True, exist_ok=True)
@@ -475,33 +595,20 @@ def main():
     # Step 1: Simulations
     # -----------------------------------------------------------------------
     if not args.no_sim:
-        sim_code = _SIM_SCRIPT.format(
-            inst_pkgs_path = str(meta_pkg / "inst_pkgs"),
+        inst_pkgs_path = str(meta_pkg / "inst_pkgs") if runner == "metapkg" \
+                         else None
+        sim_code = _build_sim_script(
             out_dir        = str(sim_out),
             small          = args.small,
             do_calib       = args.calib,
             n_cores        = args.cores,
             yaml_list      = [str(p) for p in yaml_files],
+            inst_pkgs_path = inst_pkgs_path,
         )
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix="_run_sim.py", delete=False)
-        tmp.write(sim_code)
-        tmp.close()
 
         print("=== Running simulations ===")
-        try:
-            rc = subprocess.run(
-                [
-                    "uv", "run",
-                    "--project", str(meta_pkg),
-                    "--env-file", str(meta_pkg / ".env"),
-                    "python", tmp.name,
-                ],
-                cwd=str(sims_cwd),
-            ).returncode
-        finally:
-            os.unlink(tmp.name)
-
+        rc = _run_simulation(runner, args.container, sim_code, sims_cwd,
+                             meta_pkg=meta_pkg)
         if rc != 0:
             sys.exit(f"Error: simulation step failed (exit code {rc}).")
 
@@ -526,24 +633,25 @@ def main():
             print("  EDPS target     : (none inferred; EDPS will use workflow default)")
 
         edps_port = read_edps_port()
-        uv_edps = ["uv", "run", "--env-file", str(meta_pkg / ".env"), "edps", "-P", str(edps_port)]
+        edps_cmd  = _edps_base_cmd(runner, args.container, edps_port, meta_pkg)
+        edps_cwd  = _edps_cwd(runner, meta_pkg)
 
         # Warm up: start the EDPS server and confirm it is ready before
         # submitting the reduction job.
         print("=== Starting EDPS server ===")
-        rc = subprocess.run(uv_edps + ["-lw"], cwd=str(meta_pkg)).returncode
+        rc = subprocess.run(edps_cmd + ["-lw"], cwd=edps_cwd).returncode
         if rc != 0:
             sys.exit(f"Error: EDPS server failed to start (exit code {rc}).")
 
-        edps_run = uv_edps + [
-            "-w", workflow,
-            "-i", str(sim_out),
-            "-o", str(pipe_out),
-        ] + target_flags
-
         print("=== Running EDPS pipeline ===")
-        rc = subprocess.run(edps_run, cwd=str(meta_pkg)).returncode
-
+        rc = subprocess.run(
+            edps_cmd + [
+                "-w", workflow,
+                "-i", str(sim_out),
+                "-o", str(pipe_out),
+            ] + target_flags,
+            cwd=edps_cwd,
+        ).returncode
         if rc != 0:
             sys.exit(f"Error: pipeline step failed (exit code {rc}).")
 

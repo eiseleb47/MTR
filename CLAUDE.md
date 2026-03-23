@@ -117,12 +117,14 @@ Low-level image processing library written in C/C++ with an Autotools build syst
 
 ## Simulation + Pipeline Wrapper
 
-`run_metis.py` is a CLI wrapper intended for end users who have run `metis-meta-package/bootstrap.sh` on their machine. It generates synthetic FITS data via ScopeSim and runs the matching EDPS workflow, all on the host.
+`run_metis.py` is a CLI wrapper that generates synthetic FITS data via ScopeSim and runs the matching EDPS workflow. It supports three execution modes via `--runner`:
 
-**Prerequisite**: `metis-meta-package/bootstrap.sh` must have been run. The wrapper looks for `~/metis-meta-package` and `~/METIS_Simulations` by default (the locations bootstrap creates them).
+- **`metapkg`** (default) — uses `uv` + `metis-meta-package`. Requires `bootstrap.sh` to have been run; looks for `~/metis-meta-package` and `~/METIS_Simulations`.
+- **`native`** — calls `edps`/`python` directly from PATH. Use this when running inside a Docker/Podman container or on a bare-metal install.
+- **`docker`/`podman`** — wraps every command with `docker exec`/`podman exec` into a named container. Requires `--container NAME` (or `METIS_CONTAINER` env var). The output directory must be bind-mounted into the container; `--simulations-dir` must be the container-internal path (default: `/home/metis/METIS_Simulations`).
 
 ```bash
-# Basic usage – infers workflow from YAML content
+# Basic usage – infers workflow from YAML content (metapkg runner)
 python run_metis.py LMS_RAD_06.yaml
 
 # Multiple YAML files, custom output dir, with auto-calibration frames
@@ -139,6 +141,13 @@ python run_metis.py --no-sim -o /tmp/myrun LMS_RAD_06.yaml
 
 # Override install locations if bootstrap used non-default paths
 python run_metis.py --meta-pkg /opt/metis-meta-package --simulations-dir /opt/METIS_Simulations obs.yaml
+
+# Inside a container or bare-metal install
+python run_metis.py --runner native LMS_RAD_06.yaml
+
+# Exec into a running Docker/Podman container from the host
+python run_metis.py --runner docker --container metis-pipeline LMS_RAD_06.yaml
+METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python run_metis.py LMS_RAD_06.yaml
 ```
 
 Output is written to `./output/<timestamp>/sim/` (FITS frames) and `./output/<timestamp>/pipeline/` (pipeline products).

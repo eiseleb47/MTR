@@ -48,18 +48,41 @@ The workflow (`lm_img`, `n_img`, `ifu`, `lm_lss`, `n_lss`, …) and the deepest 
 | Flag | Default | Description |
 |---|---|---|
 | `-o / --output-dir` | `./output/<timestamp>` | Root directory for all outputs |
+| `--runner {metapkg,native,docker,podman}` | `metapkg` | Execution mode (see below) |
+| `--container NAME` | — | Container name/ID for `docker`/`podman` runners (env: `METIS_CONTAINER`) |
 | `--calib` | off | Auto-generate calibration frames (dark/flat) inferred from YAML content |
 | `--small` | off | Use 32×32 detector cutouts for fast testing |
 | `--no-sim` | off | Skip simulation; run pipeline on existing data |
 | `--no-pipeline` | off | Run simulation only; skip pipeline |
-| `--meta-pkg PATH` | `~/metis-meta-package` | Path to the meta-package install |
-| `--simulations-dir PATH` | `~/METIS_Simulations` | Path to ScopeSim scripts |
+| `--meta-pkg PATH` | `~/metis-meta-package` | Path to the meta-package install (`metapkg` runner only) |
+| `--simulations-dir PATH` | `~/METIS_Simulations` | Path to ScopeSim scripts (host path for `native`/`metapkg`; container-internal path for `docker`/`podman`) |
+
+### Runner modes
+
+| Mode | When to use |
+|---|---|
+| `metapkg` (default) | You ran `metis-meta-package/bootstrap.sh`. Tools are managed by `uv` inside the meta-package. |
+| `native` | Tools (`edps`, `python`, ScopeSim) are installed directly on PATH — e.g. you are running **inside** a Docker/Podman container, or have a bare-metal install. |
+| `docker` / `podman` | Tools live inside a container and you are running the script **outside** it. The runner wraps every command with `docker exec` / `podman exec`. |
+
+The runner can also be set via the `METIS_RUNNER` environment variable.
+
+> **Note for `docker`/`podman` runners:** the output directory (`-o`) must be bind-mounted into the container so EDPS can write pipeline products to it. The `--simulations-dir` flag should point to the path of `METIS_Simulations/Simulations` *inside* the container (default: `/home/metis/METIS_Simulations`).
 
 ### Examples
 
 ```bash
-# Full run: simulate + reduce a complete IFU observation sequence
+# Full run with metis-meta-package (default)
 python run_metis.py LMS_RAD_06.yaml
+
+# Inside a container or bare-metal install (tools on PATH)
+python run_metis.py --runner native LMS_RAD_06.yaml
+
+# Exec into a running Docker container from the host
+python run_metis.py --runner docker --container metis-pipeline LMS_RAD_06.yaml
+
+# Exec into a running Podman container; set runner via env var
+METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python run_metis.py LMS_RAD_06.yaml
 
 # Multiple YAML files, custom output dir, with auto-calibration frames
 python run_metis.py -o /tmp/myrun --calib obs1.yaml obs2.yaml

@@ -19,6 +19,9 @@ from run_metis import (
     MODE_TO_WORKFLOW,
     TECH_TO_WORKFLOW,
     WORKFLOW_TASK_CHAIN,
+    _build_sim_script,
+    _edps_base_cmd,
+    _edps_cwd,
     collect_tags_from_fits,
     infer_edps_target,
     infer_workflow,
@@ -460,6 +463,97 @@ class TestCollectTagsFromFits:
         # Should not raise; no .fits files → empty set
         tags = collect_tags_from_fits(tmp_path)
         assert tags == set()
+
+
+# ---------------------------------------------------------------------------
+# _build_sim_script
+# ---------------------------------------------------------------------------
+
+class TestBuildSimScript:
+    _base_kwargs = dict(
+        out_dir="/tmp/sim",
+        small=False,
+        do_calib=False,
+        n_cores=4,
+        yaml_list=["/data/obs.yaml"],
+    )
+
+    def test_metapkg_runner_includes_inst_pkgs_override(self):
+        script = _build_sim_script(
+            **self._base_kwargs,
+            inst_pkgs_path="/home/user/metis-meta-package/inst_pkgs",
+        )
+        assert "local_packages_path" in script
+        assert "/home/user/metis-meta-package/inst_pkgs" in script
+
+    def test_native_runner_omits_inst_pkgs_override(self):
+        script = _build_sim_script(**self._base_kwargs, inst_pkgs_path=None)
+        assert "local_packages_path" not in script
+
+    def test_script_contains_output_dir(self):
+        script = _build_sim_script(**self._base_kwargs)
+        assert "/tmp/sim" in script
+
+    def test_script_contains_yaml_list(self):
+        script = _build_sim_script(**self._base_kwargs)
+        assert "/data/obs.yaml" in script
+
+    def test_script_is_valid_python(self):
+        import ast
+        script = _build_sim_script(**self._base_kwargs)
+        # Should not raise
+        ast.parse(script)
+
+    def test_small_flag_reflected_in_script(self):
+        script = _build_sim_script(**{**self._base_kwargs, "small": True})
+        assert "True" in script
+
+
+# ---------------------------------------------------------------------------
+# _edps_base_cmd and _edps_cwd
+# ---------------------------------------------------------------------------
+
+class TestEdpsBaseCmd:
+    def test_metapkg_runner_uses_uv(self, tmp_path):
+        meta_pkg = tmp_path / "meta"
+        meta_pkg.mkdir()
+        (meta_pkg / ".env").write_text("")
+        cmd = _edps_base_cmd("metapkg", None, 4444, meta_pkg=meta_pkg)
+        assert cmd[:2] == ["uv", "run"]
+        assert "edps" in cmd
+        assert "-P" in cmd
+        assert "4444" in cmd
+
+    def test_native_runner_calls_edps_directly(self):
+        cmd = _edps_base_cmd("native", None, 5000)
+        assert cmd[0] == "edps"
+        assert "-P" in cmd
+        assert "5000" in cmd
+        assert "uv" not in cmd
+
+    def test_docker_runner_wraps_with_exec(self):
+        cmd = _edps_base_cmd("docker", "my-container", 4444)
+        assert cmd[:3] == ["docker", "exec", "my-container"]
+        assert "edps" in cmd
+
+    def test_podman_runner_wraps_with_exec(self):
+        cmd = _edps_base_cmd("podman", "my-container", 4444)
+        assert cmd[:3] == ["podman", "exec", "my-container"]
+        assert "edps" in cmd
+
+
+class TestEdpsCwd:
+    def test_metapkg_runner_returns_meta_pkg_path(self, tmp_path):
+        assert _edps_cwd("metapkg", meta_pkg=tmp_path) == str(tmp_path)
+
+    def test_native_runner_returns_none(self):
+        assert _edps_cwd("native") is None
+
+    def test_docker_runner_returns_none(self):
+        assert _edps_cwd("docker") is None
+
+    def test_podman_runner_returns_none(self):
+        assert _edps_cwd("podman") is None
 
 
 # ---------------------------------------------------------------------------
