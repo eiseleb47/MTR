@@ -1,5 +1,10 @@
 # METIS Test Runner
 
+[![Unit Tests](https://github.com/eiseleb47/MTR/actions/workflows/unit_tests.yaml/badge.svg)](https://github.com/eiseleb47/MTR/actions/workflows/unit_tests.yaml)
+[![Python 3](https://img.shields.io/badge/python-3-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Last Commit](https://img.shields.io/github/last-commit/eiseleb47/MTR)](https://github.com/eiseleb47/MTR/commits/main)
+[![Platform](https://img.shields.io/badge/platform-linux-lightgrey?logo=linux&logoColor=white)](https://github.com/eiseleb47/MTR)
+
 A CLI wrapper for end-to-end testing of the [METIS instrument pipeline](https://github.com/AstarVienna/METIS_Pipeline). It generates synthetic FITS observations via [ScopeSim](https://scopesim.readthedocs.io/) and then runs the matching [EDPS](https://www.eso.org/sci/software/edps/) reduction workflow, all in one command.
 
 ## Prerequisites
