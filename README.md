@@ -23,7 +23,7 @@ cd ~/metis-meta-package
 bash bootstrap.sh
 ```
 
-The runner looks for `~/metis-meta-package/` and `~/METIS_Simulations/` by default. Pass `--meta-pkg` / `--simulations-dir` to override.
+The runner looks for `./metis-meta-package/` and `./METIS_Simulations/` in the current working directory by default. Pass `--meta-pkg` / `--simulations-dir` to override.
 
 **Option B — Docker or Podman container** (`--runner docker` / `--runner podman`)
 
@@ -42,6 +42,10 @@ Then pass `--runner docker --container metis-pipeline` (or set `METIS_RUNNER`/`M
 **Option C — bare-metal or inside a container** (`--runner native`)
 
 If the pipeline tools (`edps`, `python`, ScopeSim) are already on your PATH — either because you are running the script *inside* a container or have installed everything directly — no additional setup is needed. Pass `--runner native`.
+
+ScopeSim instrument packages (Armazones, ELT, METIS) will be downloaded into `./inst_pkgs/` in your current working directory on first use. Pass `--inst-pkgs PATH` to download or reuse packages from a fixed location instead.
+
+> **Tip:** always run `run_metis.py` from the same directory (or pass `--inst-pkgs`), otherwise ScopeSim will download a fresh copy of the instrument packages into every new directory, cluttering your filesystem.
 
 ## Installation
 
@@ -71,8 +75,9 @@ The workflow (`lm_img`, `n_img`, `ifu`, `lm_lss`, `n_lss`, …) and the deepest 
 | `--small` | off | Use 32×32 detector cutouts for fast testing |
 | `--no-sim` | off | Skip simulation; run pipeline on existing data |
 | `--no-pipeline` | off | Run simulation only; skip pipeline |
-| `--meta-pkg PATH` | `~/metis-meta-package` | Path to the meta-package install (`metapkg` runner only) |
-| `--simulations-dir PATH` | `~/METIS_Simulations` | Path to ScopeSim scripts (host path for `native`/`metapkg`; container-internal path for `docker`/`podman`) |
+| `--meta-pkg PATH` | `./metis-meta-package` | Path to the meta-package install (`metapkg` runner only) |
+| `--simulations-dir PATH` | `./METIS_Simulations` | Path to ScopeSim scripts (host path for `native`/`metapkg`; container-internal path for `docker`/`podman`) |
+| `--inst-pkgs PATH` | see below | Path to ScopeSim instrument packages (Armazones, ELT, METIS). Defaults to `<meta-pkg>/inst_pkgs` for `metapkg`, `./inst_pkgs` (CWD) for `native`, and container-resolved `./inst_pkgs` for `docker`/`podman` |
 
 ### Runner modes
 

@@ -119,7 +119,7 @@ Low-level image processing library written in C/C++ with an Autotools build syst
 
 `run_metis.py` is a CLI wrapper that generates synthetic FITS data via ScopeSim and runs the matching EDPS workflow. It supports three execution modes via `--runner`:
 
-- **`metapkg`** (default) — uses `uv` + `metis-meta-package`. Requires `bootstrap.sh` to have been run; looks for `~/metis-meta-package` and `~/METIS_Simulations`.
+- **`metapkg`** (default) — uses `uv` + `metis-meta-package`. Requires `bootstrap.sh` to have been run; looks for `./metis-meta-package` and `./METIS_Simulations` in the current working directory.
 - **`native`** — calls `edps`/`python` directly from PATH. Use this when running inside a Docker/Podman container or on a bare-metal install.
 - **`docker`/`podman`** — wraps every command with `docker exec`/`podman exec` into a named container. Requires `--container NAME` (or `METIS_CONTAINER` env var). The output directory must be bind-mounted into the container; `--simulations-dir` must be the container-internal path (default: `/home/metis/METIS_Simulations`).
 
@@ -142,7 +142,10 @@ python run_metis.py --no-sim -o /tmp/myrun LMS_RAD_06.yaml
 # Override install locations if bootstrap used non-default paths
 python run_metis.py --meta-pkg /opt/metis-meta-package --simulations-dir /opt/METIS_Simulations obs.yaml
 
-# Inside a container or bare-metal install
+# Inside a container or bare-metal install; point to pre-downloaded instrument packages
+python run_metis.py --runner native --inst-pkgs /path/to/inst_pkgs LMS_RAD_06.yaml
+
+# native runner without --inst-pkgs: ScopeSim downloads packages into ./inst_pkgs/ on first use
 python run_metis.py --runner native LMS_RAD_06.yaml
 
 # Exec into a running Docker/Podman container from the host

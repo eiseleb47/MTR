@@ -501,14 +501,25 @@ def parse_args():
     p.add_argument(
         "--meta-pkg", metavar="DIR",
         help="Path to the metis-meta-package directory "
-             "[default: ~/metis-meta-package] (metapkg runner only)",
+             "[default: ./metis-meta-package] (metapkg runner only)",
     )
     p.add_argument(
         "--simulations-dir", metavar="DIR",
         help="Path to the METIS_Simulations repository. For docker/podman "
              "runners this must be the path *inside* the container "
-             "[default: ~/METIS_Simulations for native/metapkg, "
+             "[default: ./METIS_Simulations for native/metapkg, "
              "/home/metis/METIS_Simulations for docker/podman]",
+    )
+    p.add_argument(
+        "--inst-pkgs", metavar="DIR",
+        help="Path to the ScopeSim instrument packages directory "
+             "(Armazones, ELT, METIS, …). "
+             "For the metapkg runner this defaults to <meta-pkg>/inst_pkgs. "
+             "For the native runner this defaults to ./inst_pkgs relative to "
+             "the current working directory — ScopeSim will download packages "
+             "there on first use. "
+             "For docker/podman runners supply the container-internal path; "
+             "if omitted ScopeSim resolves ./inst_pkgs inside the container.",
     )
     return p.parse_args()
 
@@ -542,7 +553,7 @@ def main():
     meta_pkg = None
     if runner == "metapkg":
         meta_pkg = Path(args.meta_pkg).resolve() if args.meta_pkg \
-                   else Path.home() / "metis-meta-package"
+                   else Path.cwd() / "metis-meta-package"
         if not (meta_pkg / ".env").exists():
             sys.exit(
                 f"Error: metis-meta-package not found at {meta_pkg}\n"
@@ -558,7 +569,7 @@ def main():
         sims_cwd = sims_root / "Simulations"
     else:
         sims_root = Path(args.simulations_dir).resolve() if args.simulations_dir \
-                    else Path.home() / "METIS_Simulations"
+                    else Path.cwd() / "METIS_Simulations"
         sims_cwd = sims_root / "Simulations"
         if not sims_cwd.is_dir():
             sys.exit(
@@ -595,8 +606,19 @@ def main():
     # Step 1: Simulations
     # -----------------------------------------------------------------------
     if not args.no_sim:
-        inst_pkgs_path = str(meta_pkg / "inst_pkgs") if runner == "metapkg" \
-                         else None
+        if args.inst_pkgs:
+            # Explicit override: use as-is for docker/podman (container path),
+            # resolve to absolute for metapkg/native.
+            inst_pkgs_path = args.inst_pkgs if runner in ("docker", "podman") \
+                             else str(Path(args.inst_pkgs).resolve())
+        elif runner == "metapkg":
+            inst_pkgs_path = str(meta_pkg / "inst_pkgs")
+        elif runner == "native":
+            inst_pkgs_path = str(Path.cwd() / "inst_pkgs")
+        else:
+            # docker/podman without explicit --inst-pkgs: ScopeSim resolves
+            # ./inst_pkgs relative to sims_cwd inside the container.
+            inst_pkgs_path = None
         sim_code = _build_sim_script(
             out_dir        = str(sim_out),
             small          = args.small,
