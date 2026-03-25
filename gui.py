@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 # ---------------------------------------------------------------------------
 
 REPO_ROOT   = Path(__file__).parent.resolve()
-META_PKG    = REPO_ROOT / "metis-meta-package"
+META_PKG    = Path(os.environ.get("METIS_META_PKG", str(REPO_ROOT / "metis-meta-package")))
 TARGET_A    = REPO_ROOT / "METIS_Pipeline"
 TARGET_B    = REPO_ROOT / "METIS_Simulations"
 REPO_A_URL  = "https://github.com/AstarVienna/METIS_Pipeline.git"

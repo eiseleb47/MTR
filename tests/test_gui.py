@@ -164,10 +164,10 @@ class TestBuildCmdArgs:
 
     def test_cores_always_included(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
-        tab.cores_spin.setValue(8)
+        tab.cores_spin.setValue(2)
         args = tab._build_cmd_args()
         assert "--cores" in args
-        assert args[args.index("--cores") + 1] == "8"
+        assert args[args.index("--cores") + 1] == "2"
 
     def test_calib_flag_when_checked(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
