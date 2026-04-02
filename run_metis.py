@@ -347,13 +347,13 @@ def infer_edps_target(workflow, data_tags, has_science):
 # Simulation driver script builder
 # ---------------------------------------------------------------------------
 
-def _build_sim_script(out_dir, small, do_calib, n_cores, yaml_list,
+def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
                       inst_pkgs_path=None):
     """Return the simulation driver script as a string.
 
-    When *inst_pkgs_path* is given (metapkg runner only) the script overrides
-    ScopeSim's local_packages_path so it resolves to the copy bundled inside
-    metis-meta-package regardless of working directory.
+    When *inst_pkgs_path* is given (metapkg and native runners) the script
+    overrides ScopeSim's local_packages_path and auto-downloads the instrument
+    packages into that directory if the METIS package is not yet present.
     """
     lines = [
         "import sys",
@@ -362,19 +362,25 @@ def _build_sim_script(out_dir, small, do_calib, n_cores, yaml_list,
         "import scopesim as sim",
     ]
     if inst_pkgs_path is not None:
-        lines.append(
-            "# Override ScopeSim's inst_pkgs path to the meta-package copy."
-        )
-        lines.append(
-            f'sim.rc.__config__["!SIM.file.local_packages_path"] = {inst_pkgs_path!r}'
-        )
+        lines += [
+            "# Override ScopeSim's inst_pkgs path.",
+            f'sim.rc.__config__["!SIM.file.local_packages_path"] = {inst_pkgs_path!r}',
+            "",
+            "# Auto-download instrument packages if not present.",
+            "from pathlib import Path as _Path",
+            f"_inst_dir = _Path({inst_pkgs_path!r})",
+            "if not (_inst_dir / 'METIS').is_dir():",
+            f"    print('Instrument packages not found at {inst_pkgs_path}. Downloading \u2026')",
+            "    _inst_dir.mkdir(parents=True, exist_ok=True)",
+            "    sim.download_packages(['METIS', 'ELT', 'Armazones'])",
+        ]
     lines += [
         "",
         "import runSimulationBlock as rsb",
         "",
         "params = dict(",
         f"    outputDir = {out_dir!r},",
-        f"    small     = {small!r},",
+        "    small     = False,",
         "    doStatic  = False,",
         f"    doCalib   = {do_calib!r},",
         "    sequence  = False,",
@@ -383,7 +389,26 @@ def _build_sim_script(out_dir, small, do_calib, n_cores, yaml_list,
         f"    nCores    = {n_cores!r},",
         "    testRun   = False,",
         ")",
-        f"rsb.runSimulationBlock({yaml_list!r}, params)",
+        "try:",
+        f"    rsb.runSimulationBlock({yaml_list!r}, params)",
+        "except ValueError as _exc:",
+        "    if 'Package could not be found' in str(_exc):",
+        "        import sys as _sys",
+        "        print('', file=_sys.stderr)",
+        "        print('HINT: ScopeSim could not find the instrument packages.', file=_sys.stderr)",
+    ]
+    if inst_pkgs_path is not None:
+        lines.append(
+            f"        print('  Instrument packages path: {inst_pkgs_path}', file=_sys.stderr)"
+        )
+    else:
+        lines.append(
+            "        print('  No instrument packages path was configured.', file=_sys.stderr)"
+        )
+    lines += [
+        "        print('  In the GUI: set the Instrument packages field in the Run tab.', file=_sys.stderr)",
+        "        print('  On the command line: pass --inst-pkgs <path>.', file=_sys.stderr)",
+        "    raise",
     ]
     return "\n".join(lines) + "\n"
 
@@ -464,10 +489,6 @@ def parse_args():
         help="Root output directory [default: ./output/<timestamp>]",
     )
     p.add_argument(
-        "-s", "--small", action="store_true",
-        help="Use 32×32 pixel detectors (fast mode for testing)",
-    )
-    p.add_argument(
         "--calib", action="store_true",
         help="Auto-generate calibration frames (dark/flat) inferred from YAML content",
     )
@@ -477,7 +498,14 @@ def parse_args():
     )
     p.add_argument(
         "--no-sim", action="store_true",
-        help="Skip simulations; run pipeline on existing <output>/sim/ directory",
+        help="Skip simulations; run pipeline on existing FITS data. "
+             "The FITS source defaults to <output>/sim/ but can be overridden "
+             "with --pipeline-input.",
+    )
+    p.add_argument(
+        "--pipeline-input", metavar="DIR",
+        help="Directory containing FITS files to use as pipeline input. "
+             "Only used with --no-sim. When omitted, defaults to <output>/sim/.",
     )
     p.add_argument(
         "--no-pipeline", action="store_true",
@@ -606,11 +634,20 @@ def main():
                   else Path.cwd() / "output" / ts
     sim_out  = output_root / "sim"
     pipe_out = output_root / "pipeline"
-    sim_out.mkdir(parents=True, exist_ok=True)
+
+    # When pipeline-only with an explicit input directory, use that as the
+    # FITS source instead of <output>/sim/.
+    if args.no_sim and args.pipeline_input:
+        sim_out = Path(args.pipeline_input).resolve()
+        if not sim_out.is_dir():
+            sys.exit(f"Error: pipeline input directory not found: {sim_out}")
+
+    if not args.no_sim:
+        sim_out.mkdir(parents=True, exist_ok=True)
     pipe_out.mkdir(parents=True, exist_ok=True)
 
     print(f"\nOutput root      : {output_root}")
-    print(f"  Simulated FITS : {sim_out}")
+    print(f"  Pipeline input : {sim_out}")
     print(f"  Pipeline output: {pipe_out}\n")
 
     # -----------------------------------------------------------------------
@@ -623,7 +660,7 @@ def main():
             inst_pkgs_path = args.inst_pkgs if runner in ("docker", "podman") \
                              else str(Path(args.inst_pkgs).resolve())
         elif runner == "metapkg":
-            inst_pkgs_path = str(meta_pkg / "inst_pkgs")
+            inst_pkgs_path = str(Path(__file__).parent.resolve() / "inst_pkgs")
         elif runner == "native":
             inst_pkgs_path = str(Path.cwd() / "inst_pkgs")
         else:
@@ -632,7 +669,6 @@ def main():
             inst_pkgs_path = None
         sim_code = _build_sim_script(
             out_dir        = str(sim_out),
-            small          = args.small,
             do_calib       = args.calib,
             n_cores        = args.cores,
             yaml_list      = [str(p) for p in yaml_files],

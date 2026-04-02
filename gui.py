@@ -313,6 +313,7 @@ class RunTab(QWidget):
         self._build_ui()
         self._load_settings()
         self._update_runner_fields()
+        self._update_mode_fields()
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -352,6 +353,19 @@ class RunTab(QWidget):
             _labeled("Output directory:", self.output_edit, out_browse)
         )
 
+        # Output path info hint
+        self.output_info = QLabel()
+        self.output_info.setStyleSheet("color: gray; font-size: 10px;")
+        info_row = QWidget()
+        info_h = QHBoxLayout(info_row)
+        info_h.setContentsMargins(0, 0, 0, 0)
+        spacer_lbl = QLabel()
+        spacer_lbl.setFixedWidth(LABEL_W)
+        info_h.addWidget(spacer_lbl)
+        info_h.addWidget(self.output_info)
+        opts_lay.addWidget(info_row)
+        self.output_edit.textChanged.connect(self._update_output_info)
+
         # Checkboxes
         cb_row = QWidget()
         cb_h = QHBoxLayout(cb_row)
@@ -360,9 +374,8 @@ class RunTab(QWidget):
         lbl.setFixedWidth(LABEL_W)
         cb_h.addWidget(lbl)
         self.calib_cb = QCheckBox("Auto-generate calibration frames  (--calib)")
-        self.small_cb = QCheckBox("Small detectors 32×32  (--small)")
+        self.calib_cb.setChecked(True)
         cb_h.addWidget(self.calib_cb)
-        cb_h.addWidget(self.small_cb)
         cb_h.addStretch()
         opts_lay.addWidget(cb_row)
 
@@ -390,6 +403,20 @@ class RunTab(QWidget):
         mode_h.addStretch()
         self.rb_both.setChecked(True)
         opts_lay.addWidget(mode_row)
+
+        # Pipeline input dir  [pipeline-only mode only]
+        self.pipeline_input_edit = QLineEdit()
+        pipe_in_browse = _dir_picker(self.pipeline_input_edit, self)
+        self.pipeline_input_edit.setPlaceholderText("(defaults to <output>/sim/)")
+        self.pipeline_input_edit.textChanged.connect(self._update_output_info)
+        self.pipeline_input_row = _labeled(
+            "Pipeline input  (--pipeline-input):",
+            self.pipeline_input_edit, pipe_in_browse,
+        )
+        opts_lay.addWidget(self.pipeline_input_row)
+        # Connect mode radio buttons now that pipeline_input_row exists
+        for rb in (self.rb_both, self.rb_sim_only, self.rb_pipe_only):
+            rb.toggled.connect(self._update_mode_fields)
 
         # Runner
         self.runner_combo = QComboBox()
@@ -420,7 +447,6 @@ class RunTab(QWidget):
         # Instrument packages  [always visible]
         self.inst_edit = QLineEdit()
         inst_browse = _dir_picker(self.inst_edit, self)
-        self.inst_edit.setPlaceholderText("(auto-resolved per runner)")
         opts_lay.addWidget(_labeled("Instrument packages  (--inst-pkgs):", self.inst_edit, inst_browse))
 
         outer.addWidget(opts_grp)
@@ -447,12 +473,47 @@ class RunTab(QWidget):
         self.log_view.setFont(QFont("Monospace", 9))
         outer.addWidget(self.log_view)
 
+    # ── Output path info ─────────────────────────────────────────────────────
+
+    def _update_output_info(self) -> None:
+        base = self.output_edit.text().strip()
+        root = Path(base) if base else REPO_ROOT / "output" / "<timestamp>"
+        pipe_out = root / "pipeline"
+
+        if self.rb_pipe_only.isChecked():
+            pipe_in = self.pipeline_input_edit.text().strip()
+            pipe_in_str = pipe_in if pipe_in else f"{root / 'sim'}/"
+            self.output_info.setText(
+                f"Pipeline input \u2192 {pipe_in_str}   \u00b7   "
+                f"Pipeline products \u2192 {pipe_out}/"
+            )
+        elif self.rb_sim_only.isChecked():
+            self.output_info.setText(
+                f"Simulations \u2192 {root / 'sim'}/"
+            )
+        else:
+            self.output_info.setText(
+                f"Simulations \u2192 {root / 'sim'}/   \u00b7   "
+                f"Pipeline products \u2192 {pipe_out}/"
+            )
+
+    # ── Mode-dependent field visibility ──────────────────────────────────────
+
+    def _update_mode_fields(self) -> None:
+        self.pipeline_input_row.setVisible(self.rb_pipe_only.isChecked())
+        self._update_output_info()
+
     # ── Runner-dependent field visibility ────────────────────────────────────
 
     def _update_runner_fields(self) -> None:
         runner = self.runner_combo.currentText()
         self.container_row.setVisible(runner in ("docker", "podman"))
         self.meta_pkg_row.setVisible(runner == "metapkg")
+        if runner in ("docker", "podman"):
+            ph = "(resolved inside container)"
+        else:
+            ph = str(REPO_ROOT / "inst_pkgs")
+        self.inst_edit.setPlaceholderText(ph)
 
     # ── YAML list ────────────────────────────────────────────────────────────
 
@@ -478,13 +539,13 @@ class RunTab(QWidget):
             args += ["-o", self.output_edit.text().strip()]
         if self.calib_cb.isChecked():
             args.append("--calib")
-        if self.small_cb.isChecked():
-            args.append("--small")
         args += ["--cores", str(self.cores_spin.value())]
         if self.rb_sim_only.isChecked():
             args.append("--no-pipeline")
         elif self.rb_pipe_only.isChecked():
             args.append("--no-sim")
+            if self.pipeline_input_edit.text().strip():
+                args += ["--pipeline-input", self.pipeline_input_edit.text().strip()]
 
         runner = self.runner_combo.currentText()
         args += ["--runner", runner]
@@ -549,8 +610,8 @@ class RunTab(QWidget):
     def _load_settings(self) -> None:
         s = self._settings
         self.output_edit.setText(s.value("output", ""))
-        self.calib_cb.setChecked(s.value("calib", False, type=bool))
-        self.small_cb.setChecked(s.value("small", False, type=bool))
+        self._update_output_info()
+        self.calib_cb.setChecked(s.value("calib", True, type=bool))
         self.cores_spin.setValue(s.value("cores", 4, type=int))
         mode = s.value("pipeline_mode", "both")
         {"sim_only": self.rb_sim_only, "pipe_only": self.rb_pipe_only}.get(
@@ -561,6 +622,7 @@ class RunTab(QWidget):
         self.meta_pkg_edit.setText(s.value("meta_pkg", ""))
         self.sim_dir_edit.setText(s.value("sim_dir", ""))
         self.inst_edit.setText(s.value("inst_pkgs", ""))
+        self.pipeline_input_edit.setText(s.value("pipeline_input", ""))
         for f in (s.value("yaml_files") or []):
             self.yaml_list.addItem(f)
 
@@ -568,7 +630,6 @@ class RunTab(QWidget):
         s = self._settings
         s.setValue("output", self.output_edit.text())
         s.setValue("calib", self.calib_cb.isChecked())
-        s.setValue("small", self.small_cb.isChecked())
         s.setValue("cores", self.cores_spin.value())
         mode = "both"
         if self.rb_sim_only.isChecked():
@@ -581,6 +642,7 @@ class RunTab(QWidget):
         s.setValue("meta_pkg", self.meta_pkg_edit.text())
         s.setValue("sim_dir", self.sim_dir_edit.text())
         s.setValue("inst_pkgs", self.inst_edit.text())
+        s.setValue("pipeline_input", self.pipeline_input_edit.text())
         s.setValue("yaml_files", [
             self.yaml_list.item(i).text() for i in range(self.yaml_list.count())
         ])

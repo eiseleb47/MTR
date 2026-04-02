@@ -134,6 +134,42 @@ class TestRunnerFieldVisibility:
 
 
 # ---------------------------------------------------------------------------
+# Instrument packages placeholder text
+# ---------------------------------------------------------------------------
+
+class TestInstPkgsPlaceholder:
+    def test_metapkg_runner_placeholder_shows_resolved_path(self, qapp):
+        import gui
+        tab = _make_run_tab(qapp)
+        tab.runner_combo.setCurrentText("metapkg")
+        assert tab.inst_edit.placeholderText() == str(gui.REPO_ROOT / "inst_pkgs")
+
+    def test_native_runner_placeholder_shows_resolved_path(self, qapp):
+        import gui
+        tab = _make_run_tab(qapp)
+        tab.runner_combo.setCurrentText("native")
+        assert tab.inst_edit.placeholderText() == str(gui.REPO_ROOT / "inst_pkgs")
+
+    def test_docker_runner_placeholder_indicates_container(self, qapp):
+        tab = _make_run_tab(qapp)
+        tab.runner_combo.setCurrentText("docker")
+        assert "container" in tab.inst_edit.placeholderText()
+
+    def test_podman_runner_placeholder_indicates_container(self, qapp):
+        tab = _make_run_tab(qapp)
+        tab.runner_combo.setCurrentText("podman")
+        assert "container" in tab.inst_edit.placeholderText()
+
+    def test_switching_runner_updates_placeholder(self, qapp):
+        import gui
+        tab = _make_run_tab(qapp)
+        tab.runner_combo.setCurrentText("metapkg")
+        assert tab.inst_edit.placeholderText() == str(gui.REPO_ROOT / "inst_pkgs")
+        tab.runner_combo.setCurrentText("docker")
+        assert "container" in tab.inst_edit.placeholderText()
+
+
+# ---------------------------------------------------------------------------
 # _build_cmd_args
 # ---------------------------------------------------------------------------
 
@@ -178,11 +214,6 @@ class TestBuildCmdArgs:
         tab = self._tab_with_yaml(qapp, "obs.yaml")
         tab.calib_cb.setChecked(False)
         assert "--calib" not in tab._build_cmd_args()
-
-    def test_small_flag_when_checked(self, qapp):
-        tab = self._tab_with_yaml(qapp, "obs.yaml")
-        tab.small_cb.setChecked(True)
-        assert "--small" in tab._build_cmd_args()
 
     def test_no_pipeline_flag_for_sim_only_mode(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")

@@ -472,7 +472,6 @@ class TestCollectTagsFromFits:
 class TestBuildSimScript:
     _base_kwargs = dict(
         out_dir="/tmp/sim",
-        small=False,
         do_calib=False,
         n_cores=4,
         yaml_list=["/data/obs.yaml"],
@@ -504,9 +503,40 @@ class TestBuildSimScript:
         # Should not raise
         ast.parse(script)
 
-    def test_small_flag_reflected_in_script(self):
-        script = _build_sim_script(**{**self._base_kwargs, "small": True})
-        assert "True" in script
+    def test_script_with_inst_pkgs_is_valid_python(self):
+        import ast
+        script = _build_sim_script(
+            **self._base_kwargs,
+            inst_pkgs_path="/home/user/inst_pkgs",
+        )
+        ast.parse(script)
+
+    def test_script_contains_download_logic_when_inst_pkgs_set(self):
+        script = _build_sim_script(
+            **self._base_kwargs,
+            inst_pkgs_path="/home/user/inst_pkgs",
+        )
+        assert "download_packages" in script
+        assert "'METIS'" in script
+
+    def test_script_omits_download_logic_when_no_inst_pkgs(self):
+        script = _build_sim_script(**self._base_kwargs, inst_pkgs_path=None)
+        assert "download_packages" not in script
+
+    def test_script_contains_error_hint_with_inst_pkgs(self):
+        script = _build_sim_script(
+            **self._base_kwargs,
+            inst_pkgs_path="/home/user/inst_pkgs",
+        )
+        assert "Package could not be found" in script
+        assert "HINT:" in script
+        assert "/home/user/inst_pkgs" in script
+
+    def test_script_contains_error_hint_without_inst_pkgs(self):
+        script = _build_sim_script(**self._base_kwargs, inst_pkgs_path=None)
+        assert "Package could not be found" in script
+        assert "HINT:" in script
+        assert "No instrument packages path was configured" in script
 
 
 # ---------------------------------------------------------------------------
