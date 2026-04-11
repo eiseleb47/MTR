@@ -33,6 +33,7 @@ If any block has catg="SCIENCE", the pipeline is run with -m science.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -305,6 +306,38 @@ def collect_tags_from_fits(fits_dir):
     return tags
 
 
+def infer_workflow_from_fits(fits_dir):
+    """Infer the EDPS workflow from DPR TECH headers in a FITS directory.
+
+    Used when --no-sim is given without any YAML files.
+    """
+    try:
+        from astropy.io import fits as afits
+    except ImportError:
+        raise ValueError("astropy is required to infer workflow from FITS headers.")
+
+    techs = []
+    for f in Path(fits_dir).glob("*.fits"):
+        try:
+            with afits.open(f, memmap=True) as hdul:
+                tech = hdul[0].header.get("HIERARCH ESO DPR TECH", "").strip()
+            if tech and tech not in techs:
+                techs.append(tech)
+        except Exception:
+            continue
+
+    for t in techs:
+        if t in TECH_TO_WORKFLOW:
+            return TECH_TO_WORKFLOW[t]
+
+    raise ValueError(
+        "Cannot determine workflow from FITS headers.\n"
+        f"  Found DPR.TECH values : {techs}\n"
+        f"  Known DPR.TECH values : {list(TECH_TO_WORKFLOW)}\n"
+        "Pass YAML files or ensure FITS headers contain a recognised DPR.TECH value."
+    )
+
+
 def infer_edps_target(workflow, data_tags, has_science):
     """Return the EDPS flags needed to target the right pipeline task(s).
 
@@ -348,17 +381,35 @@ def infer_edps_target(workflow, data_tags, has_science):
 # ---------------------------------------------------------------------------
 
 def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
-                      inst_pkgs_path=None):
+                      inst_pkgs_path=None, sims_root=None):
     """Return the simulation driver script as a string.
 
     When *inst_pkgs_path* is given (metapkg and native runners) the script
     overrides ScopeSim's local_packages_path and auto-downloads the instrument
     packages into that directory if the METIS package is not yet present.
     """
+    path_entry = str(sims_root) if sims_root is not None else "python"
+    # metis_simulations submodules read DEFAULT_IRDB_LOCATION at import time;
+    # it must be set in the environment before the package is imported.
+    default_irdb = f"{path_entry}/inst_pkgs" if sims_root is not None else "./inst_pkgs"
     lines = [
         "import sys",
-        'sys.path.insert(0, "python")',
+        "import os as _os",
+        f"sys.path.insert(0, {path_entry!r})",
         "",
+    ]
+    if inst_pkgs_path is not None:
+        lines += [
+            f"_os.environ['DEFAULT_IRDB_LOCATION'] = {inst_pkgs_path!r}",
+            "",
+        ]
+    else:
+        lines += [
+            "if 'DEFAULT_IRDB_LOCATION' not in _os.environ:",
+            f"    _os.environ['DEFAULT_IRDB_LOCATION'] = {default_irdb!r}",
+            "",
+        ]
+    lines += [
         "import scopesim as sim",
     ]
     if inst_pkgs_path is not None:
@@ -376,7 +427,7 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
         ]
     lines += [
         "",
-        "import runSimulationBlock as rsb",
+        "from metis_simulations import runSimulationBlock as rsb",
         "",
         "params = dict(",
         f"    outputDir = {out_dir!r},",
@@ -390,7 +441,7 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
         "    testRun   = False,",
         ")",
         "try:",
-        f"    rsb.runSimulationBlock({yaml_list!r}, params)",
+        f"    rsb.runSimulationBlock({yaml_list!r}, params, [])",
         "except ValueError as _exc:",
         "    if 'Package could not be found' in str(_exc):",
         "        import sys as _sys",
@@ -460,7 +511,8 @@ def _edps_base_cmd(runner, container, edps_port, meta_pkg=None):
     """Return the command prefix list up to and including the edps port flag."""
     base = ["edps", "-P", str(edps_port)]
     if runner == "metapkg":
-        return ["uv", "run", "--env-file", str(meta_pkg / ".env")] + base
+        return ["uv", "run", "--project", str(meta_pkg),
+                "--env-file", str(meta_pkg / ".env")] + base
     if runner in ("docker", "podman"):
         return [runner, "exec", container] + base
     return base  # native
@@ -481,8 +533,8 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "yaml_files", nargs="+", metavar="YAML",
-        help="One or more observation-block YAML files",
+        "yaml_files", nargs="*", metavar="YAML",
+        help="One or more observation-block YAML files (not required with --no-sim)",
     )
     p.add_argument(
         "-o", "--output", metavar="DIR",
@@ -563,6 +615,9 @@ def main():
     if args.no_sim and args.no_pipeline:
         sys.exit("Error: --no-sim and --no-pipeline both set; nothing to do.")
 
+    if not args.no_sim and not args.yaml_files:
+        p.error("YAML files are required unless --no-sim is given")
+
     if runner in ("docker", "podman") and not args.container:
         sys.exit(
             f"Error: --container NAME is required when --runner={runner}\n"
@@ -585,13 +640,17 @@ def main():
         if args.meta_pkg:
             meta_pkg = Path(args.meta_pkg).resolve()
         else:
-            for candidate in [Path.cwd() / "pipeline",
-                              Path.cwd() / "metis-meta-package"]:
+            _env_pkg = os.environ.get("METIS_META_PKG")
+            candidates = (
+                ([Path(_env_pkg)] if _env_pkg else []) +
+                [Path.cwd() / "pipeline", Path.cwd() / "metis-meta-package"]
+            )
+            for candidate in candidates:
                 if (candidate / ".env").exists():
                     meta_pkg = candidate
                     break
             else:
-                meta_pkg = Path.cwd() / "pipeline"
+                meta_pkg = Path(_env_pkg) if _env_pkg else Path.cwd() / "pipeline"
         if not (meta_pkg / ".env").exists():
             sys.exit(
                 f"Error: pipeline environment not found at {meta_pkg}\n"
@@ -605,28 +664,34 @@ def main():
     if runner in ("docker", "podman"):
         sims_root = Path(args.simulations_dir) if args.simulations_dir \
                     else Path("/home/metis/METIS_Simulations")
-        sims_cwd = sims_root / "Simulations"
+        sims_cwd = sims_root
     else:
         sims_root = Path(args.simulations_dir).resolve() if args.simulations_dir \
                     else Path.cwd() / "METIS_Simulations"
-        sims_cwd = sims_root / "Simulations"
-        if not sims_cwd.is_dir():
+        sims_cwd = sims_root
+        if not (sims_root / "metis_simulations").is_dir():
             sys.exit(
                 f"Error: METIS_Simulations not found at {sims_root}\n"
                 "Pass --simulations-dir if it is installed elsewhere."
             )
 
-    # Infer workflow and collect data tags from YAML
-    print("Analysing YAML file(s) …")
-    try:
-        workflow, has_science, yaml_tags = infer_workflow(yaml_files)
-    except ValueError as exc:
-        sys.exit(f"Error: {exc}")
-
+    # Infer workflow and collect data tags from YAML (if provided)
     print(f"  Runner    : {runner}"
           + (f" (container: {args.container})" if args.container else ""))
-    print(f"  Workflow  : {workflow}")
-    print(f"  Data tags : {sorted(yaml_tags) or '(none found)'}")
+    if yaml_files:
+        print("Analysing YAML file(s) …")
+        try:
+            workflow, has_science, yaml_tags = infer_workflow(yaml_files)
+        except ValueError as exc:
+            sys.exit(f"Error: {exc}")
+        print(f"  Workflow  : {workflow}")
+        print(f"  Data tags : {sorted(yaml_tags) or '(none found)'}")
+    else:
+        # Pipeline-only with no YAML: workflow will be inferred from FITS headers
+        workflow = None
+        has_science = False
+        yaml_tags = set()
+        print("  Workflow  : (will be inferred from FITS headers)")
 
     # Create output directories
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -673,6 +738,7 @@ def main():
             n_cores        = args.cores,
             yaml_list      = [str(p) for p in yaml_files],
             inst_pkgs_path = inst_pkgs_path,
+            sims_root      = sims_root,
         )
 
         print("=== Running simulations ===")
@@ -692,6 +758,12 @@ def main():
             if fits_tags:
                 print(f"  FITS tags found : {sorted(fits_tags)}")
             data_tags = yaml_tags | fits_tags
+            if workflow is None:
+                try:
+                    workflow = infer_workflow_from_fits(sim_out)
+                    print(f"  Workflow  : {workflow}")
+                except ValueError as exc:
+                    sys.exit(f"Error: {exc}")
         else:
             data_tags = yaml_tags
 
@@ -704,6 +776,12 @@ def main():
         edps_port = read_edps_port()
         edps_cmd  = _edps_base_cmd(runner, args.container, edps_port, meta_pkg)
         edps_cwd  = _edps_cwd(runner, meta_pkg)
+        # EDPS and PyEsorex write log files to their cwd.  For local runners,
+        # override cwd to pipe_out (host-accessible via the MTR bind mount) so
+        # the logs land there.  uv finds the virtualenv via --project, so cwd
+        # no longer needs to be the meta_pkg directory.
+        if runner not in ("docker", "podman"):
+            edps_cwd = str(pipe_out)
 
         # Warm up: start the EDPS server and confirm it is ready before
         # submitting the reduction job.

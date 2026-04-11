@@ -2,6 +2,7 @@
 METIS_Pipeline/
 METIS_Simulations/
 metis-meta-package/
+MetisWISE/
 
 # Test/scratch YAML files
 *.yaml
@@ -16,6 +17,9 @@ pipeline/
 # Local test data and pipeline outputs
 data/
 output/
+logs/
+uv-cache/
+EDPS_data/
 
 # Claude Code internal files
 .claude/

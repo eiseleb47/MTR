@@ -475,6 +475,7 @@ class TestBuildSimScript:
         do_calib=False,
         n_cores=4,
         yaml_list=["/data/obs.yaml"],
+        sims_root="/fake/METIS_Simulations",
     )
 
     def test_metapkg_runner_includes_inst_pkgs_override(self):
@@ -537,6 +538,20 @@ class TestBuildSimScript:
         assert "Package could not be found" in script
         assert "HINT:" in script
         assert "No instrument packages path was configured" in script
+
+    def test_script_uses_package_import(self):
+        script = _build_sim_script(**self._base_kwargs)
+        assert "from metis_simulations import runSimulationBlock" in script
+        assert "\nimport runSimulationBlock" not in script
+
+    def test_script_passes_args_to_runSimulationBlock(self):
+        script = _build_sim_script(**self._base_kwargs)
+        assert "params, []" in script
+
+    def test_script_sys_path_uses_sims_root(self):
+        script = _build_sim_script(**self._base_kwargs)
+        assert "/fake/METIS_Simulations" in script
+        assert 'sys.path.insert(0, "python")' not in script
 
 
 # ---------------------------------------------------------------------------

@@ -40,34 +40,34 @@ LABEL_W = 280   # fixed label column width in the Run options form
 
 THEMES: dict[str, dict[str, str]] = {
     "dark": {
-        # Catppuccin Mocha-inspired
-        "window":         "#1e1e2e",
-        "window_text":    "#cdd6f4",
-        "base":           "#181825",
-        "alt_base":       "#313244",
-        "button":         "#313244",
-        "button_text":    "#cdd6f4",
-        "highlight":      "#89b4fa",
-        "highlight_text": "#1e1e2e",
-        "placeholder":    "#6c7086",
-        "tooltip_base":   "#313244",
-        "tooltip_text":   "#cdd6f4",
-        "border":         "#45475a",
-        "accent":         "#cba6f7",   # Mocha Mauve
-        "accent_dim":     "#7a6b9a",   # muted Mauve for scroll handles
-        "btn_success_bg": "#a6e3a1",   # Mocha Green
-        "btn_success_fg": "#1e1e2e",
-        "btn_danger_bg":  "#f38ba8",   # Mocha Red
-        "btn_danger_fg":  "#1e1e2e",
-        "btn_info_bg":    "#89b4fa",   # Mocha Blue
-        "btn_info_fg":    "#1e1e2e",
+        # SWP-S50 colour palette
+        "window":         "#16203A",
+        "window_text":    "#E8EAF6",
+        "base":           "#0E1830",
+        "alt_base":       "#243046",
+        "button":         "#243046",
+        "button_text":    "#E8EAF6",
+        "highlight":      "#4A9EFF",
+        "highlight_text": "#16203A",
+        "placeholder":    "#4A5568",
+        "tooltip_base":   "#243046",
+        "tooltip_text":   "#E8EAF6",
+        "border":         "#3A4E6E",
+        "accent":         "#4A9EFF",
+        "accent_dim":     "#1C3A6E",
+        "btn_success_bg": "#a6e3a1",   # keep Catppuccin green (no local equivalent)
+        "btn_success_fg": "#16203A",
+        "btn_danger_bg":  "#FF6B6B",   # SWP-S50 red
+        "btn_danger_fg":  "#16203A",
+        "btn_info_bg":    "#4A9EFF",   # SWP-S50 blue
+        "btn_info_fg":    "#16203A",
         "log_green":      "#a6e3a1",
-        "log_red":        "#f38ba8",
+        "log_red":        "#FF6B6B",
         "log_cyan":       "#94e2d5",
         "log_yellow":     "#f9e2af",
         "log_orange":     "#fab387",
-        "log_gray":       "#6c7086",
-        "log_default":    "#cdd6f4",
+        "log_gray":       "#4A5568",
+        "log_default":    "#E8EAF6",
     },
     "light": {
         # Catppuccin Latte-inspired
@@ -393,7 +393,6 @@ class InstallWorker(QThread):
             recipe_dir = str(TARGET_A / "metisp" / "pyrecipes") + "/"
             os.environ["PYCPL_RECIPE_DIR"] = recipe_dir
             os.environ["PYESOREX_PLUGIN_DIR"] = recipe_dir
-            self.log.emit(f"Exported PYCPL_RECIPE_DIR={recipe_dir}\n", "")
             self._run(["uv", "sync"], cwd=META_PKG)
 
             self._step("Writing .env…")
@@ -435,7 +434,7 @@ class InstallWorker(QThread):
             except BrokenPipeError:
                 pass
         for line in proc.stdout:
-            self.log.emit(line, "")
+            self.log.emit(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line), "")
         proc.wait(timeout=timeout)
         if proc.returncode not in (0, None):
             raise RuntimeError(
@@ -470,6 +469,7 @@ class InstallWorker(QThread):
             '    "adari_core",\n'
             '    "scopesim",\n'
             '    "scopesim_templates",\n'
+            '    "pyyaml",\n'
             "]\n"
             "\n"
             "[tool.uv]\n"
@@ -516,9 +516,11 @@ class InstallWorker(QThread):
     def _write_env(self) -> None:
         env_path = META_PKG / ".env"
         env_path.write_text(
-            f"PYTHONPATH={TARGET_A}/metisp/pymetis/src/\n"
+            f"PYTHONPATH={TARGET_B}:{TARGET_A}/metisp/pymetis/src/\n"
             f"PYCPL_RECIPE_DIR={TARGET_A}/metisp/pyrecipes/\n"
             f"PYESOREX_PLUGIN_DIR={TARGET_A}/metisp/pyrecipes/\n"
+            "PYESOREX_MSG_LEVEL=debug\n"
+            "PYESOREX_LOG_LEVEL=debug\n"
         )
         self.log.emit(f"Written {env_path}\n", "")
 
@@ -537,6 +539,7 @@ class InstallTab(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
+        layout.setContentsMargins(20, 20, 20, 20)
 
         desc = QLabel(
             "<b>METIS Pipeline Installation</b><br><br>"
@@ -608,10 +611,11 @@ class RunTab(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setSpacing(12)
+        outer.setContentsMargins(20, 20, 20, 20)
 
         # ── YAML file list ──
-        yaml_grp = QGroupBox("YAML Input Files")
-        yaml_lay = QVBoxLayout(yaml_grp)
+        self.yaml_grp = QGroupBox("YAML Input Files")
+        yaml_lay = QVBoxLayout(self.yaml_grp)
         file_row = QHBoxLayout()
         self.yaml_list = QListWidget()
         self.yaml_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -629,7 +633,7 @@ class RunTab(QWidget):
         btn_col.addStretch()
         file_row.addLayout(btn_col)
         yaml_lay.addLayout(file_row)
-        outer.addWidget(yaml_grp)
+        outer.addWidget(self.yaml_grp)
 
         # ── Options ──
         opts_grp = QGroupBox("Options")
@@ -674,14 +678,12 @@ class RunTab(QWidget):
         self.cores_spin = QSpinBox()
         self.cores_spin.setRange(1, os.cpu_count() or 16)
         self.cores_spin.setValue(4)
-        self.cores_spin.setMaximumWidth(70)
         self.cores_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.PlusMinus)
         opts_lay.addWidget(_labeled("CPU cores  (--cores):", self.cores_spin))
 
         # Runner
         self.runner_combo = QComboBox()
         self.runner_combo.addItems(["metapkg", "native", "docker", "podman"])
-        self.runner_combo.setMaximumWidth(130)
         opts_lay.addWidget(_labeled("Runner  (--runner):", self.runner_combo))
 
         # Pipeline mode
@@ -705,7 +707,7 @@ class RunTab(QWidget):
         # Pipeline input dir  [pipeline-only mode only]
         self.pipeline_input_edit = QLineEdit()
         pipe_in_browse = _dir_picker(self.pipeline_input_edit, self)
-        self.pipeline_input_edit.setPlaceholderText("(defaults to <output>/sim/)")
+        self.pipeline_input_edit.setPlaceholderText("(defaults to output/<YYYYMMDDTHHMMSS>/sim/)")
         self.pipeline_input_edit.textChanged.connect(self._update_output_info)
         self.pipeline_input_row = _labeled(
             "Pipeline input  (--pipeline-input):",
@@ -795,7 +797,9 @@ class RunTab(QWidget):
     # ── Mode-dependent field visibility ──────────────────────────────────────
 
     def _update_mode_fields(self) -> None:
-        self.pipeline_input_row.setVisible(self.rb_pipe_only.isChecked())
+        pipe_only = self.rb_pipe_only.isChecked()
+        self.yaml_grp.setVisible(not pipe_only)
+        self.pipeline_input_row.setVisible(pipe_only)
         self._update_output_info()
 
     # ── Runner-dependent field visibility ────────────────────────────────────
@@ -846,8 +850,8 @@ class RunTab(QWidget):
         args += ["--runner", runner]
         if runner in ("docker", "podman") and self.container_edit.text().strip():
             args += ["--container", self.container_edit.text().strip()]
-        if runner == "metapkg" and self.meta_pkg_edit.text().strip():
-            args += ["--meta-pkg", self.meta_pkg_edit.text().strip()]
+        if runner == "metapkg":
+            args += ["--meta-pkg", self.meta_pkg_edit.text().strip() or str(META_PKG)]
         if self.sim_dir_edit.text().strip():
             args += ["--simulations-dir", self.sim_dir_edit.text().strip()]
         if self.inst_edit.text().strip():
@@ -859,7 +863,7 @@ class RunTab(QWidget):
         return args
 
     def _run(self) -> None:
-        if self.yaml_list.count() == 0:
+        if not self.rb_pipe_only.isChecked() and self.yaml_list.count() == 0:
             QMessageBox.warning(self, "No input files", "Add at least one YAML file.")
             return
 
@@ -875,8 +879,10 @@ class RunTab(QWidget):
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
 
-        log_append(self.log_view, f"$ {sys.executable} {script} {' '.join(args)}\n\n", "cyan")
-        self._process.start(sys.executable, [script] + args)
+        venv_python = META_PKG / ".venv" / "bin" / "python3"
+        python_exe = str(venv_python) if venv_python.exists() else sys.executable
+        log_append(self.log_view, f"$ {python_exe} {script} {' '.join(args)}\n\n", "cyan")
+        self._process.start(python_exe, ["-u", script] + args)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
@@ -884,13 +890,17 @@ class RunTab(QWidget):
         if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
             self._process.kill()
 
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
     def _on_stdout(self) -> None:
         data = self._process.readAllStandardOutput().data().decode(errors="replace")
-        log_append(self.log_view, data)
+        log_append(self.log_view, self._strip_ansi(data))
 
     def _on_stderr(self) -> None:
         data = self._process.readAllStandardError().data().decode(errors="replace")
-        log_append(self.log_view, data, "orange")
+        log_append(self.log_view, self._strip_ansi(data), "orange")
 
     def _on_finished(self, exit_code: int, _status) -> None:
         self.run_btn.setEnabled(True)
@@ -950,24 +960,25 @@ class RunTab(QWidget):
 class _ExpandingTabBar(QTabBar):
     """Tab bar that divides its width equally among all tabs, overriding QSS."""
 
-    def tabSizeHint(self, index: int):
-        hint = super().tabSizeHint(index)
-        count = self.count()
-        w = self.width()
-        if w == 0 and self.parent():
-            w = self.parent().width()
-        if count > 0 and w > 0:
-            hint.setWidth(w // count)
-        return hint
-
-    def minimumTabSizeHint(self, index: int):
-        hint = super().minimumTabSizeHint(index)
-        hint.setWidth(0)
-        return hint
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.update()
+        count = self.count()
+        if count > 0:
+            new_ss = f"QTabBar::tab {{ width: {event.size().width() // count}px; }}"
+            if self.styleSheet() != new_ss:
+                self.setStyleSheet(new_ss)
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        parent = self.parent()
+        if parent and parent.width() > 0:
+            sh.setWidth(parent.width())
+        return sh
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        sh.setWidth(0)
+        return sh
 
 
 # ---------------------------------------------------------------------------
