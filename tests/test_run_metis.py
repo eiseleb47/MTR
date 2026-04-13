@@ -53,6 +53,18 @@ class TestReadEdpsPort:
         with patch("run_metis.Path.home", return_value=tmp_path):
             assert read_edps_port(default=5000) == 5000
 
+    def test_warns_on_malformed_port_value(self, tmp_path, capsys):
+        # Silent fallback to default is confusing: user thinks EDPS is on
+        # 5000 while the real config has a typo. We want a stderr breadcrumb.
+        props_dir = tmp_path / ".edps"
+        props_dir.mkdir()
+        (props_dir / "application.properties").write_text("port=4444, 5555\n")
+        with patch("run_metis.Path.home", return_value=tmp_path):
+            assert read_edps_port(default=5000) == 5000
+        err = capsys.readouterr().err
+        assert "malformed" in err
+        assert "4444, 5555" in err
+
     def test_picks_port_from_multiline_file(self, tmp_path):
         props_dir = tmp_path / ".edps"
         props_dir.mkdir()
@@ -158,6 +170,33 @@ class TestInferWorkflow:
             block1:
               do.catg: LM_IMAGE_SCI_RAW
               mode: img_lm
+              properties:
+                catg: "SCIENCE"
+        """)
+        wf, _, _ = infer_workflow([f])
+        assert wf == "metis.metis_lm_img_wkf"
+
+    # --- normalisation: whitespace and case tolerance ---
+
+    def test_tech_with_whitespace_around_comma_still_resolves(self, tmp_path):
+        # Human-edited YAML often has "IMAGE, LM" with a space; we shouldn't
+        # force users to know the keys are spaceless.
+        f = _write_yaml(tmp_path, "obs.yaml", """
+            block1:
+              do.catg: LM_IMAGE_SCI_RAW
+              properties:
+                tech: "IMAGE, LM"
+                catg: "SCIENCE"
+        """)
+        wf, _, _ = infer_workflow([f])
+        assert wf == "metis.metis_lm_img_wkf"
+
+    def test_mode_with_wrong_case_still_resolves(self, tmp_path):
+        # Mode keys are lowercase; accept upper-case YAML values too.
+        f = _write_yaml(tmp_path, "obs.yaml", """
+            block1:
+              do.catg: LM_IMAGE_SCI_RAW
+              mode: IMG_LM
               properties:
                 catg: "SCIENCE"
         """)
@@ -600,6 +639,15 @@ class TestEdpsBaseCmd:
         cmd = _edps_base_cmd("podman", "my-container", 4444)
         assert cmd[:3] == ["podman", "exec", "my-container"]
         assert "edps" in cmd
+
+    def test_metapkg_runner_raises_when_env_file_missing(self, tmp_path):
+        # uv's own error for a missing --env-file is correct but unhelpful;
+        # we want a loud pre-flight pointing the user at the Install tab.
+        meta_pkg = tmp_path / "meta"
+        meta_pkg.mkdir()
+        # No .env written
+        with pytest.raises(FileNotFoundError, match="Install tab"):
+            _edps_base_cmd("metapkg", None, 4444, meta_pkg=meta_pkg)
 
 
 class TestEdpsCwd:

@@ -3,6 +3,7 @@ METIS_Pipeline/
 METIS_Simulations/
 metis-meta-package/
 MetisWISE/
+inst_pkgs/
 
 # Test/scratch YAML files
 *.yaml
@@ -32,6 +33,7 @@ __pycache__/
 dist/
 build/
 *.egg
+uv.lock
 
 # FITS files (large binary data)
 *.fits

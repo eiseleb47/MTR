@@ -219,11 +219,28 @@ def read_edps_port(default: int = 5000) -> int:
         for line in props.read_text().splitlines():
             line = line.strip()
             if line.startswith("port="):
+                raw = line.split("=", 1)[1]
                 try:
-                    return int(line.split("=", 1)[1])
+                    return int(raw)
                 except ValueError:
-                    pass
+                    print(
+                        f"warning: {props} has malformed port value "
+                        f"{raw!r}; falling back to default {default}",
+                        file=sys.stderr,
+                    )
     return default
+
+
+def _normalize_tech(tech: str) -> str:
+    """Normalise a tech string for lookup: upper-case, trim whitespace,
+    collapse spaces around commas. Keys in TECH_TO_WORKFLOW use this form."""
+    return ",".join(part.strip() for part in tech.upper().split(","))
+
+
+def _normalize_mode(mode: str) -> str:
+    """Normalise a mode string for lookup: lower-case and trim whitespace.
+    Keys in MODE_TO_WORKFLOW use this form."""
+    return mode.strip().lower()
 
 
 def infer_workflow(yaml_files):
@@ -262,11 +279,13 @@ def infer_workflow(yaml_files):
                 has_science = True
 
     for t in techs:
-        if t in TECH_TO_WORKFLOW:
-            return TECH_TO_WORKFLOW[t], has_science, data_tags
+        key = _normalize_tech(t)
+        if key in TECH_TO_WORKFLOW:
+            return TECH_TO_WORKFLOW[key], has_science, data_tags
     for m in modes:
-        if m in MODE_TO_WORKFLOW:
-            return MODE_TO_WORKFLOW[m], has_science, data_tags
+        key = _normalize_mode(m)
+        if key in MODE_TO_WORKFLOW:
+            return MODE_TO_WORKFLOW[key], has_science, data_tags
 
     raise ValueError(
         "Cannot determine workflow from YAML content.\n"
@@ -476,6 +495,22 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
 # Runner-aware subprocess helpers
 # ---------------------------------------------------------------------------
 
+def _check_metapkg_env(runner, meta_pkg):
+    """Raise FileNotFoundError if metapkg runner is configured but .env is missing.
+
+    uv's own error message when ``--env-file`` points at a missing file is
+    technically correct but unhelpful. Fail fast with a pointer at the Install
+    tab / METIS_META_PKG.
+    """
+    if runner != "metapkg":
+        return
+    env_file = meta_pkg / ".env"
+    if not env_file.exists():
+        raise FileNotFoundError(
+            f"{env_file} not found — run the Install tab or check METIS_META_PKG"
+        )
+
+
 def _run_simulation(runner, container, sim_code, sims_cwd, meta_pkg=None):
     """Execute the simulation script in the appropriate environment.
 
@@ -492,6 +527,8 @@ def _run_simulation(runner, container, sim_code, sims_cwd, meta_pkg=None):
              "python", "-"],
             input=sim_code.encode(),
         ).returncode
+
+    _check_metapkg_env(runner, meta_pkg)
 
     # For metapkg and native, write to a temp file and run it.
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix="_run_sim.py",
@@ -519,6 +556,7 @@ def _edps_base_cmd(runner, container, edps_port, meta_pkg=None):
     """Return the command prefix list up to and including the edps port flag."""
     base = ["edps", "-P", str(edps_port)]
     if runner == "metapkg":
+        _check_metapkg_env(runner, meta_pkg)
         return ["uv", "run", "--project", str(meta_pkg),
                 "--env-file", str(meta_pkg / ".env")] + base
     if runner in ("docker", "podman"):

@@ -301,45 +301,48 @@ class TestBuildCmdArgs:
 # ---------------------------------------------------------------------------
 
 class TestPatchEdpsConfig:
+    # All three keys must be present for _patch_edps_config to succeed — it
+    # raises if any pattern matches zero times.
+    FULL_PROPS = "port=5000\nworkflow_dir=/old\nesorex_path=esorex\n"
+
     def _make_worker(self, qapp):
         from gui import InstallWorker
         return InstallWorker()
 
-    def test_patches_port(self, qapp, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+    def _seed(self, tmp_path, content):
         edps = tmp_path / ".edps"
         edps.mkdir()
-        (edps / "application.properties").write_text("port=5000\n")
+        (edps / "application.properties").write_text(content)
+        return edps / "application.properties"
+
+    def test_patches_port(self, qapp, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        props = self._seed(tmp_path, self.FULL_PROPS)
         self._make_worker(qapp)._patch_edps_config()
-        assert "port=4444" in (edps / "application.properties").read_text()
+        assert "port=4444" in props.read_text()
 
     def test_patches_workflow_dir(self, qapp, tmp_path, monkeypatch):
         from gui import TARGET_A
         monkeypatch.setenv("HOME", str(tmp_path))
-        edps = tmp_path / ".edps"
-        edps.mkdir()
-        (edps / "application.properties").write_text("workflow_dir=/old/path\n")
+        props = self._seed(tmp_path, self.FULL_PROPS)
         self._make_worker(qapp)._patch_edps_config()
-        content = (edps / "application.properties").read_text()
-        assert f"{TARGET_A}/metisp/workflows" in content
+        assert f"{TARGET_A}/metisp/workflows" in props.read_text()
 
     def test_patches_esorex_path(self, qapp, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        edps = tmp_path / ".edps"
-        edps.mkdir()
-        (edps / "application.properties").write_text("esorex_path=esorex\n")
+        props = self._seed(tmp_path, self.FULL_PROPS)
         self._make_worker(qapp)._patch_edps_config()
-        assert "esorex_path=pyesorex" in (edps / "application.properties").read_text()
+        assert "esorex_path=pyesorex" in props.read_text()
 
     def test_preserves_unrelated_lines(self, qapp, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        edps = tmp_path / ".edps"
-        edps.mkdir()
-        (edps / "application.properties").write_text(
-            "port=5000\nsome.other.key=value\nesorex_path=esorex\n"
+        props = self._seed(
+            tmp_path,
+            "port=5000\nsome.other.key=value\n"
+            "workflow_dir=/old\nesorex_path=esorex\n",
         )
         self._make_worker(qapp)._patch_edps_config()
-        assert "some.other.key=value" in (edps / "application.properties").read_text()
+        assert "some.other.key=value" in props.read_text()
 
     def test_raises_when_file_missing(self, qapp, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -349,16 +352,26 @@ class TestPatchEdpsConfig:
 
     def test_patches_all_three_keys_at_once(self, qapp, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        edps = tmp_path / ".edps"
-        edps.mkdir()
-        (edps / "application.properties").write_text(
-            "port=5000\nworkflow_dir=/old\nesorex_path=esorex\n"
-        )
+        props = self._seed(tmp_path, self.FULL_PROPS)
         self._make_worker(qapp)._patch_edps_config()
-        content = (edps / "application.properties").read_text()
+        content = props.read_text()
         assert "port=4444" in content
         assert "esorex_path=pyesorex" in content
         assert "workflow_dir=/old" not in content
+
+    def test_raises_when_port_key_absent(self, qapp, tmp_path, monkeypatch):
+        # If EDPS drifts its config format, we want a loud error that names
+        # the missing key, not a silent no-op that rewrites the file unchanged.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed(tmp_path, "workflow_dir=/old\nesorex_path=esorex\n")
+        with pytest.raises(RuntimeError, match="port"):
+            self._make_worker(qapp)._patch_edps_config()
+
+    def test_raises_when_workflow_dir_key_absent(self, qapp, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed(tmp_path, "port=5000\nesorex_path=esorex\n")
+        with pytest.raises(RuntimeError, match="workflow_dir"):
+            self._make_worker(qapp)._patch_edps_config()
 
 
 # ---------------------------------------------------------------------------
@@ -400,3 +413,37 @@ class TestWriteEnv:
         self._make_worker(qapp)._write_env()
         content = (tmp_path / ".env").read_text()
         assert str(gui.TARGET_A) in content
+
+
+# ---------------------------------------------------------------------------
+# InstallWorker._clone_or_update — submodule (.git as file) handling
+# ---------------------------------------------------------------------------
+
+class TestCloneOrUpdateSubmodule:
+    def _make_worker(self, qapp):
+        from gui import InstallWorker
+        return InstallWorker()
+
+    def test_submodule_checkout_takes_update_branch(self, qapp, tmp_path, monkeypatch):
+        # Submodules store .git as a FILE pointing at the parent's
+        # .git/modules/<name>/, not a directory. The old is_dir() check would
+        # misclassify this as "not a git repo" and refuse to update.
+        target = tmp_path / "submodule_checkout"
+        target.mkdir()
+        (target / ".git").write_text("gitdir: ../.git/modules/submodule_checkout\n")
+        (target / "README.md").write_text("content\n")  # non-empty
+
+        worker = self._make_worker(qapp)
+        invoked = []
+        # Replace both _run (fetch) and subprocess.run (pull) so nothing hits
+        # the real git binary.
+        monkeypatch.setattr(worker, "_run", lambda cmd, **kw: invoked.append(cmd))
+        from unittest.mock import patch as mock_patch, MagicMock
+        fake_pull = MagicMock(return_value=MagicMock(stdout="", stderr=""))
+        with mock_patch("gui.subprocess.run", fake_pull):
+            worker._clone_or_update("http://example.invalid/x.git", target)
+
+        # Took the fetch path (via _run), not the clone path.
+        assert invoked, "_clone_or_update should have called _run for fetch"
+        assert "fetch" in invoked[0]
+        # Did not raise the "not a git repo and is not empty" error.

@@ -442,7 +442,9 @@ class InstallWorker(QThread):
             )
 
     def _clone_or_update(self, url: str, target: Path) -> None:
-        if (target / ".git").is_dir():
+        # .git can be a directory (normal clone) OR a file pointing at
+        # .git/modules/<name>/ (submodule checkout); both are valid git repos.
+        if (target / ".git").exists():
             self._run(["git", "-C", str(target), "fetch", "--all", "--prune"])
             result = subprocess.run(
                 ["git", "-C", str(target), "pull", "--ff-only"],
@@ -513,12 +515,17 @@ class InstallWorker(QThread):
             )
         text = props.read_text()
         patches = {
-            r"^port=.*":          "port=4444",
-            r"^workflow_dir=.*":  f"workflow_dir={TARGET_A}/metisp/workflows",
-            r"^esorex_path=.*":   "esorex_path=pyesorex",
+            "port":         (r"^port=.*",         "port=4444"),
+            "workflow_dir": (r"^workflow_dir=.*", f"workflow_dir={TARGET_A}/metisp/workflows"),
+            "esorex_path":  (r"^esorex_path=.*",  "esorex_path=pyesorex"),
         }
-        for pattern, replacement in patches.items():
-            text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+        for key, (pattern, replacement) in patches.items():
+            text, count = re.subn(pattern, replacement, text, flags=re.MULTILINE)
+            if count == 0:
+                raise RuntimeError(
+                    f"{props} has no '{key}=' line to patch — EDPS config "
+                    f"format may have changed; re-run EDPS initialisation."
+                )
         props.write_text(text)
         self.log.emit(f"Patched {props}\n", "")
 
