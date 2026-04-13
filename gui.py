@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QProcess, QSettings, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QProcess, QProcessEnvironment, QSettings, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPalette, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox,
@@ -33,6 +33,26 @@ REPO_A_URL  = "https://github.com/AstarVienna/METIS_Pipeline.git"
 REPO_B_URL  = "https://github.com/AstarVienna/METIS_Simulations.git"
 
 LABEL_W = 280   # fixed label column width in the Run options form
+
+
+# ---------------------------------------------------------------------------
+# Subprocess environment
+# ---------------------------------------------------------------------------
+
+def _child_env() -> dict[str, str]:
+    """Return a copy of os.environ with uv's venv-activation variables removed.
+
+    The GUI is launched via ``uv run gui.py`` (from launch.sh), which sets
+    ``VIRTUAL_ENV`` to MTR's own .venv. If we inherit that into subprocesses
+    that invoke ``uv run --project <meta-pkg>``, uv prints a warning on every
+    call about the mismatched active venv. Stripping these variables silences
+    that warning without affecting uv's project resolution.
+    """
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
+    return env
+
 
 # ---------------------------------------------------------------------------
 # Themes
@@ -425,6 +445,7 @@ class InstallWorker(QThread):
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             text=True,
+            env=_child_env(),
         )
         if stdin_text is not None:
             try:
@@ -505,7 +526,8 @@ class InstallWorker(QThread):
             self._run(base, cwd=META_PKG, stdin_text="\n", timeout=60)
         finally:
             subprocess.run(base + ["-s"], cwd=str(META_PKG),
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15,
+                           env=_child_env())
 
     def _patch_edps_config(self) -> None:
         props = Path.home() / ".edps" / "application.properties"
@@ -894,6 +916,14 @@ class RunTab(QWidget):
         self._process.readyReadStandardOutput.connect(self._on_stdout)
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
+
+        # Strip uv's venv-activation variables so it doesn't warn about a
+        # mismatched active venv on every internal `uv run --project <meta-pkg>`
+        # call inside run_metis.py. See _child_env() for details.
+        qenv = QProcessEnvironment()
+        for k, v in _child_env().items():
+            qenv.insert(k, v)
+        self._process.setProcessEnvironment(qenv)
 
         venv_python = META_PKG / ".venv" / "bin" / "python3"
         python_exe = str(venv_python) if venv_python.exists() else sys.executable

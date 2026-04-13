@@ -7,15 +7,71 @@
   <a href="https://github.com/eiseleb47/MTR"><img src="https://img.shields.io/badge/platform-linux-fab387?style=for-the-badge&labelColor=1e1e2e&logo=linux&logoColor=cdd6f4" alt="Platform"></a>
 </p>
 
-A CLI wrapper for end-to-end testing of the [METIS instrument pipeline](https://github.com/AstarVienna/METIS_Pipeline). It generates synthetic FITS observations via [ScopeSim](https://scopesim.readthedocs.io/) and then runs the matching [EDPS](https://www.eso.org/sci/software/edps/) reduction workflow, all in one command.
+A graphical front-end for end-to-end testing of the [METIS instrument pipeline](https://github.com/AstarVienna/METIS_Pipeline). It generates synthetic FITS observations via [ScopeSim](https://scopesim.readthedocs.io/) and then runs the matching [EDPS](https://www.eso.org/sci/software/edps/) reduction workflow — all from a single, self-contained GUI. A command-line interface (`run_metis.py`) is also shipped as a fallback for scripted or headless use.
 
-## Prerequisites
+## Quick Start
 
-The runner supports three installation layouts. Choose the one that matches how you have the pipeline installed:
+```bash
+git clone <this-repo-url>
+cd MTR
+./launch.sh
+```
 
-**Option A — metis-meta-package** (`--runner metapkg`, default)
+`launch.sh` boots the GUI via `uv`. If `uv` is not already installed, it will prompt you once to install it, then proceed. After the first launch — once `uv` is on your PATH — you can also start the GUI directly with `uv run gui.py`.
 
-Run the bootstrap on your machine. It installs `uv`, ScopeSim, EDPS, PyEsoRex, and all Python dependencies:
+From there, everything — installing the pipeline, selecting a runner, picking YAML inputs, and watching live pipeline output — is available as point-and-click controls.
+
+## The GUI
+
+The GUI is the recommended way to drive the test runner. It exposes every CLI flag through labelled controls, remembers your settings between sessions, and streams colour-coded live output from the pipeline.
+
+Launch it with:
+
+```bash
+./launch.sh         # first time (also installs uv if missing)
+uv run gui.py       # any subsequent launch
+```
+
+A **Light / Dark theme** button lives in the toolbar and toggles on the fly.
+
+### Install tab
+
+The Install tab performs the full pipeline bootstrap non-interactively. Use it if you do **not** already have the pipeline installed. Clicking **Install / Update** will:
+
+1. Install `uv` if it is not on PATH
+2. Clone (or update, if already present) `METIS_Pipeline` and `METIS_Simulations` into the repo root
+3. Run `uv sync` to install all Python dependencies
+4. Initialise and configure EDPS on port 4444
+5. Write `metis-meta-package/.env`
+
+Re-running is safe — existing repositories are updated in place rather than re-cloned.
+
+**Skip this tab** if you already have the pipeline installed via one of these paths — jump straight to the Run tab instead:
+
+- **metis-meta-package** — choose runner `metapkg` and set *Meta-package dir* to your `metis-meta-package` folder
+- **Bare-metal / ESO docs install** — choose runner `native`
+- **Pipeline container** (Docker / Podman) — choose runner `docker` or `podman` and supply the container name
+
+### Run tab
+
+The Run tab wraps `run_metis.py` in a file-picker UI. All CLI options are exposed as form controls; runner-specific fields (container name, meta-package path) show and hide based on the selected runner.
+
+Workflow:
+
+1. **Add YAML input files** via the file browser (the list supports multi-select removal)
+2. **Tune options** — output directory, CPU cores, auto-calibration, runner mode, pipeline mode (simulate + run, simulate only, pipeline only), simulations directory, instrument packages directory
+3. **Click Run** — the Run button becomes Stop, and pipeline output streams into the log view with ANSI colouring stripped and stderr highlighted
+4. **Inspect output** — the pane below the option form shows exactly where simulation frames and pipeline products will be written, updating live as you edit the output path
+
+Settings are persisted via `QSettings` and restored on next launch, so you can re-run the last configuration with two clicks.
+
+## Prerequisites (runner modes)
+
+Regardless of whether you drive the runner from the GUI or the CLI, the underlying pipeline tools have to live *somewhere*. Three layouts are supported — pick the one that matches your install:
+
+**Option A — metis-meta-package** (runner `metapkg`, default)
+
+The Install tab takes care of this automatically. Equivalent shell version:
 
 ```bash
 git clone <metis-meta-package-url> ~/metis-meta-package
@@ -23,9 +79,9 @@ cd ~/metis-meta-package
 bash bootstrap.sh
 ```
 
-The runner looks for `./metis-meta-package/` and `./METIS_Simulations/` in the current working directory by default. Pass `--meta-pkg` / `--simulations-dir` to override.
+The runner looks for `./metis-meta-package/` and `./METIS_Simulations/` in the current working directory by default. Use the GUI's *Meta-package dir* field (or `--meta-pkg` / `--simulations-dir`) to override.
 
-**Option B — Docker or Podman container** (`--runner docker` / `--runner podman`)
+**Option B — Docker or Podman container** (runner `docker` / `podman`)
 
 Build and start the pipeline container from [METIS_Pipeline/toolbox/](https://github.com/AstarVienna/METIS_Pipeline/tree/main/toolbox):
 
@@ -37,124 +93,21 @@ docker run -d --name metis-pipeline --net=host \
   metispipeline
 ```
 
-Then pass `--runner docker --container metis-pipeline` (or set `METIS_RUNNER`/`METIS_CONTAINER`). The output directory must be bind-mounted into the container.
+Then in the GUI, set runner to `docker` (or `podman`) and enter the container name. The output directory must be bind-mounted into the container so EDPS can write products back to the host.
 
-**Option C — bare-metal or inside a container** (`--runner native`)
+**Option C — bare-metal or inside a container** (runner `native`)
 
-If the pipeline tools (`edps`, `python`, ScopeSim) are already on your PATH — either because you are running the script *inside* a container or have installed everything directly — no additional setup is needed. Pass `--runner native`.
+If the pipeline tools (`edps`, `python`, ScopeSim) are already on your PATH — either because you are running *inside* a container, or have installed everything directly — no extra setup is needed. Select runner `native`.
 
-ScopeSim instrument packages (Armazones, ELT, METIS) will be downloaded into `./inst_pkgs/` in your current working directory on first use. Pass `--inst-pkgs PATH` to download or reuse packages from a fixed location instead.
+ScopeSim instrument packages (Armazones, ELT, METIS) will be downloaded into `./inst_pkgs/` in your current working directory on first use. Set the GUI's *Instrument packages* field (or `--inst-pkgs PATH`) to download or reuse packages from a fixed location instead.
 
-> **Tip:** always run `run_metis.py` from the same directory (or pass `--inst-pkgs`), otherwise ScopeSim will download a fresh copy of the instrument packages into every new directory, cluttering your filesystem.
-
-## Installation
-
-Clone this repo anywhere:
-
-```bash
-git clone <this-repo-url>
-cd MTR
-```
-
-For the CLI, no extra install step is needed beyond the prerequisites above.
-
-## GUI
-
-A graphical front-end is available via `launch.sh`. Launch it with:
-
-```bash
-./launch.sh
-```
-
-If `uv` is not yet installed, the script will prompt you to install it first (one-time setup).
-
-It provides two tabs:
-
-**Install tab** — runs the full `metis-meta-package` bootstrap non-interactively:
-- Installs `uv` if not already on PATH
-- Clones or updates `METIS_Pipeline` and `METIS_Simulations` into the current directory
-- Runs `uv sync` to install all Python dependencies
-- Initialises and configures EDPS on port 4444
-- Writes `metis-meta-package/.env`
-
-Re-running is safe — existing repositories are updated, not re-cloned.
-
-**Run tab** — wraps `run_metis.py` with a file-picker UI:
-- Add one or more YAML input files via a file browser
-- All CLI options are exposed as labelled controls; runner-specific fields (container name, meta-package path) appear and disappear based on the selected runner
-- Live output log with a Stop button
-- Settings are remembered between sessions
-
-## Usage (CLI)
-
-```bash
-python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
-```
-
-The workflow (`lm_img`, `n_img`, `ifu`, `lm_lss`, `n_lss`, …) and the deepest pipeline target task are inferred automatically from the YAML content.
-
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `-o / --output-dir` | `./output/<timestamp>` | Root directory for all outputs |
-| `--runner {metapkg,native,docker,podman}` | `metapkg` | Execution mode (see below) |
-| `--container NAME` | — | Container name/ID for `docker`/`podman` runners (env: `METIS_CONTAINER`) |
-| `--calib` | off | Auto-generate calibration frames (dark/flat) inferred from YAML content |
-| `--small` | off | Use 32×32 detector cutouts for fast testing |
-| `--no-sim` | off | Skip simulation; run pipeline on existing data |
-| `--no-pipeline` | off | Run simulation only; skip pipeline |
-| `--meta-pkg PATH` | `./metis-meta-package` | Path to the meta-package install (`metapkg` runner only) |
-| `--simulations-dir PATH` | `./METIS_Simulations` | Path to ScopeSim scripts (host path for `native`/`metapkg`; container-internal path for `docker`/`podman`) |
-| `--inst-pkgs PATH` | see below | Path to ScopeSim instrument packages (Armazones, ELT, METIS). Defaults to `<meta-pkg>/inst_pkgs` for `metapkg`, `./inst_pkgs` (CWD) for `native`, and container-resolved `./inst_pkgs` for `docker`/`podman` |
-
-### Runner modes
-
-| Mode | When to use |
-|---|---|
-| `metapkg` (default) | You ran `metis-meta-package/bootstrap.sh`. Tools are managed by `uv` inside the meta-package. |
-| `native` | Tools (`edps`, `python`, ScopeSim) are installed directly on PATH — e.g. you are running **inside** a Docker/Podman container, or have a bare-metal install. |
-| `docker` / `podman` | Tools live inside a container and you are running the script **outside** it. The runner wraps every command with `docker exec` / `podman exec`. |
-
-The runner can also be set via the `METIS_RUNNER` environment variable.
-
-> **Note for `docker`/`podman` runners:** the output directory (`-o`) must be bind-mounted into the container so EDPS can write pipeline products to it. The `--simulations-dir` flag should point to the path of `METIS_Simulations/Simulations` *inside* the container (default: `/home/metis/METIS_Simulations`).
-
-### Examples
-
-```bash
-# Full run with metis-meta-package (default)
-python run_metis.py LMS_RAD_06.yaml
-
-# Inside a container or bare-metal install (tools on PATH)
-python run_metis.py --runner native LMS_RAD_06.yaml
-
-# Exec into a running Docker container from the host
-python run_metis.py --runner docker --container metis-pipeline LMS_RAD_06.yaml
-
-# Exec into a running Podman container; set runner via env var
-METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python run_metis.py LMS_RAD_06.yaml
-
-# Multiple YAML files, custom output dir, with auto-calibration frames
-python run_metis.py -o /tmp/myrun --calib obs1.yaml obs2.yaml
-
-# Fast mode (32×32 detectors) for quick iteration
-python run_metis.py --small LMS_RAD_06.yaml
-
-# Only simulate, inspect the FITS files manually
-python run_metis.py --no-pipeline LMS_RAD_06.yaml
-
-# Only run the pipeline on previously simulated data
-python run_metis.py --no-sim -o /tmp/myrun LMS_RAD_06.yaml
-```
-
-Output is written to:
-- `<output-dir>/sim/` — synthetic FITS frames from ScopeSim
-- `<output-dir>/pipeline/` — reduced data products from EDPS
+> **Tip:** always launch the GUI (or invoke `run_metis.py`) from the same directory — otherwise ScopeSim will download a fresh copy of the instrument packages into every new directory, cluttering your filesystem.
 
 ## YAML Format
 
-Each top-level key in the YAML is one *observation block*. The workflow is inferred from `properties.tech` (primary) or `mode` (fallback). Required fields per block:
+Each top-level key in the YAML is one *observation block*. The workflow (`lm_img`, `n_img`, `ifu`, `lm_lss`, `n_lss`, …) and the deepest pipeline target task are inferred automatically from the YAML content — primarily from `properties.tech`, falling back to `mode`.
+
+Required fields per block:
 
 ```yaml
 BLOCK_NAME:
@@ -188,19 +141,94 @@ See `LMS_RAD_06.yaml` for a complete IFU example covering the full calibration +
 | `metis_lm_app_wkf` | `APP,LM` |
 | `metis_pupil_imaging_wkf` | `PUP,LM`, `PUP,N` |
 
+## Output Layout
+
+Output is written under the chosen output directory (default: `./output/<timestamp>/`):
+
+- `<output-dir>/sim/` — synthetic FITS frames from ScopeSim
+- `<output-dir>/pipeline/` — reduced data products from EDPS
+
+The GUI displays the resolved paths live under the *Output directory* field so you can see exactly where products will land before you hit Run.
+
+## Command-Line Fallback
+
+`run_metis.py` is the headless interface that the GUI drives under the hood. It is useful for scripting, CI jobs, and SSH sessions without a display. It accepts the same options as the GUI.
+
+```bash
+python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o / --output` | `./output/<timestamp>` | Root directory for all outputs |
+| `--runner {metapkg,native,docker,podman}` | `metapkg` | Execution mode (see below; env: `METIS_RUNNER`) |
+| `--container NAME` | — | Container name/ID for `docker` / `podman` runners (env: `METIS_CONTAINER`) |
+| `--calib` | off | Auto-generate calibration frames (dark/flat) inferred from YAML content |
+| `--cores N` | `4` | CPU cores used for parallel simulations |
+| `--no-sim` | off | Skip simulation; run pipeline on existing FITS data (source defaults to `<output>/sim/` — override with `--pipeline-input`) |
+| `--pipeline-input DIR` | `<output>/sim/` | Directory containing FITS files to feed the pipeline (only with `--no-sim`) |
+| `--no-pipeline` | off | Run simulation only; skip EDPS pipeline |
+| `--meta-pkg PATH` | `./metis-meta-package` | Path to the meta-package install (`metapkg` runner only) |
+| `--simulations-dir PATH` | `./METIS_Simulations` (host) or `/home/metis/METIS_Simulations` (container) | Path to ScopeSim scripts |
+| `--inst-pkgs PATH` | see below | Path to ScopeSim instrument packages (Armazones, ELT, METIS). Defaults to `<meta-pkg>/inst_pkgs` for `metapkg`, `./inst_pkgs` (CWD) for `native`, and container-resolved `./inst_pkgs` for `docker`/`podman` |
+
+### Runner modes
+
+| Mode | When to use |
+|---|---|
+| `metapkg` (default) | You ran `metis-meta-package/bootstrap.sh` (or the GUI's Install tab). Tools are managed by `uv` inside the meta-package. |
+| `native` | Tools (`edps`, `python`, ScopeSim) are installed directly on PATH — e.g. you are running **inside** a Docker/Podman container, or have a bare-metal install. |
+| `docker` / `podman` | Tools live inside a container and you are running the script **outside** it. The runner wraps every command with `docker exec` / `podman exec`. |
+
+> **Note for `docker` / `podman` runners:** the output directory (`-o`) must be bind-mounted into the container so EDPS can write pipeline products to it. The `--simulations-dir` flag should point to the path of `METIS_Simulations/Simulations` *inside* the container (default: `/home/metis/METIS_Simulations`).
+
+### Examples
+
+```bash
+# Full run with metis-meta-package (default)
+python run_metis.py LMS_RAD_06.yaml
+
+# Inside a container or bare-metal install (tools on PATH)
+python run_metis.py --runner native LMS_RAD_06.yaml
+
+# Exec into a running Docker container from the host
+python run_metis.py --runner docker --container metis-pipeline LMS_RAD_06.yaml
+
+# Exec into a running Podman container; set runner via env var
+METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python run_metis.py LMS_RAD_06.yaml
+
+# Multiple YAML files, custom output dir, with auto-calibration frames
+python run_metis.py -o /tmp/myrun --calib obs1.yaml obs2.yaml
+
+# Crank up parallelism for big simulation batches
+python run_metis.py --cores 12 LMS_RAD_06.yaml
+
+# Only simulate, inspect the FITS files manually
+python run_metis.py --no-pipeline LMS_RAD_06.yaml
+
+# Only run the pipeline on previously simulated data
+python run_metis.py --no-sim -o /tmp/myrun LMS_RAD_06.yaml
+
+# Pipeline-only with FITS files from a custom location
+python run_metis.py --no-sim --pipeline-input /data/sim_fits -o /tmp/myrun
+```
+
 ## Repository Layout
 
 ```
 MTR/
-├── run_metis.py            # Main CLI script
-├── gui.py                  # Graphical front-end (PyQt6)
+├── gui.py                  # Graphical front-end (PyQt6) — primary entry point
+├── launch.sh               # GUI launcher (installs uv if missing, then runs gui.py)
+├── run_metis.py            # Headless CLI (used directly or wrapped by the GUI)
 ├── LMS_RAD_06.yaml         # Full IFU observation sequence (reference example)
 └── podman-compose.yml      # Container environment for isolated runs
 ```
 
 ## Related Repositories
 
-This runner is designed to work alongside the following repos, which are installed via the `metis-meta-package` bootstrap:
+This runner is designed to work alongside the following repos, which are installed via the GUI's Install tab (or the `metis-meta-package` bootstrap):
 
 - **[METIS_Pipeline](https://github.com/AstarVienna/METIS_Pipeline)** — the core Python/C pipeline, EDPS workflows, and PyEsoRex recipes
 - **[METIS_Simulations](https://github.com/AstarVienna/METIS_Simulations)** — ScopeSim scripts that generate synthetic FITS observations for each observing mode
