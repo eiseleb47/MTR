@@ -450,7 +450,9 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
             "if not (_inst_dir / 'METIS').is_dir():",
             f"    print('Instrument packages not found at {inst_pkgs_path}. Downloading \u2026')",
             "    _inst_dir.mkdir(parents=True, exist_ok=True)",
-            "    sim.download_packages(['METIS', 'ELT', 'Armazones'])",
+            "    sim.download_packages('METIS', release='2026-02-18')",
+            "    sim.download_packages('ELT', release='2025-10-26')",
+            "    sim.download_packages('Armazones', release='2023-07-11')"
         ]
     lines += [
         "",
@@ -832,6 +834,7 @@ def main():
         # Warm up: start the EDPS server and confirm it is ready before
         # submitting the reduction job.
         print("=== Starting EDPS server ===")
+        print("=== Listing Workflows    ===")
         rc = subprocess.run(edps_cmd + ["-lw"], cwd=edps_cwd).returncode
         if rc != 0:
             sys.exit(f"Error: EDPS server failed to start (exit code {rc}).")

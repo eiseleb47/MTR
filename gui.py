@@ -495,7 +495,7 @@ class InstallWorker(QThread):
             'description = "Meta package for METIS Pipeline ESO stack"\n'
             'requires-python = ">=3.11, <3.14"\n'
             "dependencies = [\n"
-            '    "pycpl",\n'
+            '    "pycpl==1.0.3.post9",\n'
             '    "edps",\n'
             '    "pyesorex",\n'
             '    "adari_core",\n'
