@@ -165,7 +165,7 @@ python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
 | `-o / --output` | `./output/<timestamp>` | Root directory for all outputs |
 | `--runner {metapkg,native,docker,podman}` | `metapkg` | Execution mode (see below; env: `METIS_RUNNER`) |
 | `--container NAME` | — | Container name/ID for `docker` / `podman` runners (env: `METIS_CONTAINER`) |
-| `--calib` | off | Auto-generate calibration frames (dark/flat) inferred from YAML content |
+| `--calib [N]` | `1` | Auto-generate N calibration frames (dark/flat) per unique config, inferred from YAML. Pass `--calib 0` to disable. |
 | `--cores N` | `4` | CPU cores used for parallel simulations |
 | `--no-sim` | off | Skip simulation; run pipeline on existing FITS data (source defaults to `<output>/sim/` — override with `--pipeline-input`) |
 | `--pipeline-input DIR` | `<output>/sim/` | Directory containing FITS files to feed the pipeline (only with `--no-sim`) |

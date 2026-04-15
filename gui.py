@@ -1403,8 +1403,8 @@ class RunTab(QWidget):
 
         if self.output_edit.text().strip():
             args += ["-o", self.output_edit.text().strip()]
-        if self.calib_cb.isChecked():
-            args.append("--calib")
+        # Checkbox checked → --calib 1 (default ON); unchecked → --calib 0.
+        args += ["--calib", "1" if self.calib_cb.isChecked() else "0"]
         args += ["--cores", str(self.cores_spin.value())]
         if self.rb_sim_only.isChecked():
             args.append("--no-pipeline")

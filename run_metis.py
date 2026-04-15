@@ -457,6 +457,34 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
         ]
     lines += [
         "",
+        "# --- skycalc cache race guard ----------------------------------------",
+        "# scopesim's skycalc_ipy backend writes its shared cache file at",
+        "# ~/.astar/skycalc_ipy/skymodel_<hash>.fits via HDUList.writeto() with",
+        "# no overwrite=True. When METIS_Simulations.setupSimulations.calculateDarks",
+        "# fans out simulate() across a multiprocessing.Pool(nCores), the first",
+        "# worker to reach a cold cache wins the write; every other worker crashes",
+        "# the pool with OSError('File ... already exists'). We cannot patch",
+        "# METIS_Simulations (vendored, out of scope), so we patch the underlying",
+        "# skycalc_ipy method here. multiprocessing on Linux forks, so the patch",
+        "# installed in the parent process is inherited by every Pool worker.",
+        "try:",
+        "    import skycalc_ipy.core as _skc_core",
+        "    _skc_orig_call = _skc_core.SkyModel.__call__",
+        "    def _skc_safe_call(self, *args, **kwargs):",
+        "        try:",
+        "            return _skc_orig_call(self, *args, **kwargs)",
+        "        except OSError as _exc:",
+        "            if 'already exists' not in str(_exc):",
+        "                raise",
+        "            # Another Pool worker already populated the cache; retry so",
+        "            # skycalc_ipy reads it back instead of re-downloading.",
+        "            return _skc_orig_call(self, *args, **kwargs)",
+        "    _skc_core.SkyModel.__call__ = _skc_safe_call",
+        "except ImportError:",
+        "    # skycalc_ipy not installed in this environment; nothing to patch.",
+        "    pass",
+        "# ---------------------------------------------------------------------",
+        "",
         "from metis_simulations import runSimulationBlock as rsb",
         "",
         "params = dict(",
@@ -622,8 +650,10 @@ def parse_args():
         help="Root output directory [default: ./output/<timestamp>]",
     )
     p.add_argument(
-        "--calib", action="store_true",
-        help="Auto-generate calibration frames (dark/flat) inferred from YAML content",
+        "--calib", type=int, nargs="?", const=1, default=1, metavar="N",
+        help="Auto-generate N calibration frames (dark/flat) per unique config, "
+             "inferred from YAML content. Bare --calib = 1; --calib 0 disables. "
+             "[default: 1]",
     )
     p.add_argument(
         "--cores", type=int, default=4, metavar="N",

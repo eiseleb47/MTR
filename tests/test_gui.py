@@ -210,12 +210,16 @@ class TestBuildCmdArgs:
     def test_calib_flag_when_checked(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
         tab.calib_cb.setChecked(True)
-        assert "--calib" in tab._build_cmd_args()
+        args = tab._build_cmd_args()
+        assert "--calib" in args
+        assert args[args.index("--calib") + 1] == "1"
 
-    def test_calib_flag_absent_when_unchecked(self, qapp):
+    def test_calib_flag_zero_when_unchecked(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
         tab.calib_cb.setChecked(False)
-        assert "--calib" not in tab._build_cmd_args()
+        args = tab._build_cmd_args()
+        assert "--calib" in args
+        assert args[args.index("--calib") + 1] == "0"
 
     def test_no_pipeline_flag_for_sim_only_mode(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
