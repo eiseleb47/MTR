@@ -221,6 +221,24 @@ class TestBuildCmdArgs:
         assert "--calib" in args
         assert args[args.index("--calib") + 1] == "0"
 
+    def test_static_flag_when_checked(self, qapp):
+        tab = self._tab_with_yaml(qapp, "obs.yaml")
+        tab.static_cb.setChecked(True)
+        args = tab._build_cmd_args()
+        assert "--static" in args
+        assert args[args.index("--static") + 1] == "1"
+
+    def test_static_flag_zero_when_unchecked(self, qapp):
+        tab = self._tab_with_yaml(qapp, "obs.yaml")
+        tab.static_cb.setChecked(False)
+        args = tab._build_cmd_args()
+        assert "--static" in args
+        assert args[args.index("--static") + 1] == "0"
+
+    def test_static_checked_by_default(self, qapp):
+        tab = self._tab_with_yaml(qapp, "obs.yaml")
+        assert tab.static_cb.isChecked()
+
     def test_no_pipeline_flag_for_sim_only_mode(self, qapp):
         tab = self._tab_with_yaml(qapp, "obs.yaml")
         tab.rb_sim_only.setChecked(True)

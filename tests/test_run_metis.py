@@ -512,6 +512,7 @@ class TestBuildSimScript:
     _base_kwargs = dict(
         out_dir="/tmp/sim",
         do_calib=False,
+        do_static=True,
         n_cores=4,
         yaml_list=["/data/obs.yaml"],
         sims_root="/fake/METIS_Simulations",
@@ -586,6 +587,22 @@ class TestBuildSimScript:
     def test_script_passes_args_to_runSimulationBlock(self):
         script = _build_sim_script(**self._base_kwargs)
         assert "params, []" in script
+
+    def test_script_do_static_true(self):
+        script = _build_sim_script(**{**self._base_kwargs, "do_static": True})
+        assert "doStatic  = True" in script
+
+    def test_script_do_static_false(self):
+        script = _build_sim_script(**{**self._base_kwargs, "do_static": False})
+        assert "doStatic  = False" in script
+
+    def test_script_do_static_coerces_int(self):
+        # The CLI passes the value as int (0 or 1); the script must still
+        # emit a real Python bool so `if params['doStatic'] == True:` holds.
+        script = _build_sim_script(**{**self._base_kwargs, "do_static": 1})
+        assert "doStatic  = True" in script
+        script = _build_sim_script(**{**self._base_kwargs, "do_static": 0})
+        assert "doStatic  = False" in script
 
     def test_script_sys_path_uses_sims_root(self):
         script = _build_sim_script(**self._base_kwargs)

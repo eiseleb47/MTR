@@ -400,7 +400,7 @@ def infer_edps_target(workflow, data_tags, has_science):
 # Simulation driver script builder
 # ---------------------------------------------------------------------------
 
-def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
+def _build_sim_script(out_dir, do_calib, do_static, n_cores, yaml_list,
                       inst_pkgs_path=None, sims_root=None):
     """Return the simulation driver script as a string.
 
@@ -490,7 +490,7 @@ def _build_sim_script(out_dir, do_calib, n_cores, yaml_list,
         "params = dict(",
         f"    outputDir = {out_dir!r},",
         "    small     = False,",
-        "    doStatic  = False,",
+        f"    doStatic  = {bool(do_static)!r},",
         f"    doCalib   = {do_calib!r},",
         "    sequence  = False,",
         "    startMJD  = None,",
@@ -654,6 +654,13 @@ def parse_args():
         help="Auto-generate N calibration frames (dark/flat) per unique config, "
              "inferred from YAML content. Bare --calib = 1; --calib 0 disables. "
              "[default: 1]",
+    )
+    p.add_argument(
+        "--static", type=int, nargs="?", const=1, default=1, metavar="N",
+        help="Generate static calibration prototypes (PERSISTENCE_MAP_*, "
+             "ATM_PROFILE, REF_STD_CAT, …) into the simulation output "
+             "directory so EDPS can associate them with recipes that expect "
+             "them. Bare --static = 1; --static 0 disables. [default: 1]",
     )
     p.add_argument(
         "--cores", type=int, default=4, metavar="N",
@@ -865,6 +872,7 @@ def main():
         sim_code = _build_sim_script(
             out_dir        = str(sim_out),
             do_calib       = args.calib,
+            do_static      = args.static,
             n_cores        = args.cores,
             yaml_list      = [str(p) for p in yaml_files],
             inst_pkgs_path = inst_pkgs_path,

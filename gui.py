@@ -1224,6 +1224,9 @@ class RunTab(QWidget):
         self.calib_cb = QCheckBox("Auto-generate calibration frames  (--calib)")
         self.calib_cb.setChecked(True)
         cb_h.addWidget(self.calib_cb)
+        self.static_cb = QCheckBox("Auto-generate static calibration prototypes  (--static)")
+        self.static_cb.setChecked(True)
+        cb_h.addWidget(self.static_cb)
         cb_h.addStretch()
         opts_lay.addWidget(cb_row)
 
@@ -1405,6 +1408,8 @@ class RunTab(QWidget):
             args += ["-o", self.output_edit.text().strip()]
         # Checkbox checked → --calib 1 (default ON); unchecked → --calib 0.
         args += ["--calib", "1" if self.calib_cb.isChecked() else "0"]
+        # Same pattern for static calibration prototypes.
+        args += ["--static", "1" if self.static_cb.isChecked() else "0"]
         args += ["--cores", str(self.cores_spin.value())]
         if self.rb_sim_only.isChecked():
             args.append("--no-pipeline")
@@ -1494,6 +1499,7 @@ class RunTab(QWidget):
         self.output_edit.setText(s.value("output", ""))
         self._update_output_info()
         self.calib_cb.setChecked(s.value("calib", True, type=bool))
+        self.static_cb.setChecked(s.value("static", True, type=bool))
         self.cores_spin.setValue(s.value("cores", 4, type=int))
         mode = s.value("pipeline_mode", "both")
         {"sim_only": self.rb_sim_only, "pipe_only": self.rb_pipe_only}.get(
@@ -1513,6 +1519,7 @@ class RunTab(QWidget):
         s = self._settings
         s.setValue("output", self.output_edit.text())
         s.setValue("calib", self.calib_cb.isChecked())
+        s.setValue("static", self.static_cb.isChecked())
         s.setValue("cores", self.cores_spin.value())
         mode = "both"
         if self.rb_sim_only.isChecked():
