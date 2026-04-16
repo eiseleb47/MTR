@@ -1257,15 +1257,31 @@ class RunTab(QWidget):
         self.rb_both.setChecked(True)
         opts_lay.addWidget(mode_row)
 
-        # Pipeline input dir  [pipeline-only mode only]
-        self.pipeline_input_edit = QLineEdit()
-        pipe_in_browse = _dir_picker(self.pipeline_input_edit, self)
-        self.pipeline_input_edit.setPlaceholderText("(defaults to output/<YYYYMMDDTHHMMSS>/sim/)")
-        self.pipeline_input_edit.textChanged.connect(self._update_output_info)
-        self.pipeline_input_row = _labeled(
-            "Pipeline input  (--pipeline-input):",
-            self.pipeline_input_edit, pipe_in_browse,
-        )
+        # Pipeline input dirs  [pipeline-only mode only]
+        self.pipeline_input_list = QListWidget()
+        self.pipeline_input_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
+        self.pipeline_input_list.setMaximumHeight(100)
+        pipe_in_content = QHBoxLayout()
+        pipe_in_content.addWidget(self.pipeline_input_list)
+        pipe_in_btns = QVBoxLayout()
+        pipe_add_btn = QPushButton("Add…")
+        pipe_add_btn.setProperty("role", "info")
+        pipe_add_btn.clicked.connect(self._add_pipeline_input)
+        pipe_rm_btn = QPushButton("Remove")
+        pipe_rm_btn.setProperty("role", "danger")
+        pipe_rm_btn.clicked.connect(self._remove_pipeline_input)
+        pipe_in_btns.addWidget(pipe_add_btn)
+        pipe_in_btns.addWidget(pipe_rm_btn)
+        pipe_in_btns.addStretch()
+        pipe_in_content.addLayout(pipe_in_btns)
+
+        self.pipeline_input_row = QWidget()
+        pi_outer = QVBoxLayout(self.pipeline_input_row)
+        pi_outer.setContentsMargins(0, 0, 0, 0)
+        pi_lbl = QLabel("Pipeline input dirs  (--pipeline-input):")
+        pi_outer.addWidget(pi_lbl)
+        pi_outer.addLayout(pipe_in_content)
         opts_lay.addWidget(self.pipeline_input_row)
         # Connect mode radio buttons now that pipeline_input_row exists
         for rb in (self.rb_both, self.rb_sim_only, self.rb_pipe_only):
@@ -1331,8 +1347,9 @@ class RunTab(QWidget):
         pipe_out = root / "pipeline"
 
         if self.rb_pipe_only.isChecked():
-            pipe_in = self.pipeline_input_edit.text().strip()
-            pipe_in_str = pipe_in if pipe_in else f"{root / 'sim'}/"
+            dirs = [self.pipeline_input_list.item(i).text()
+                    for i in range(self.pipeline_input_list.count())]
+            pipe_in_str = ", ".join(dirs) if dirs else f"{root / 'sim'}/"
             self.output_info.setText(
                 f"Pipeline input \u2192 {pipe_in_str}   \u00b7   "
                 f"Pipeline products \u2192 {pipe_out}/"
@@ -1382,6 +1399,21 @@ class RunTab(QWidget):
         for item in self.yaml_list.selectedItems():
             self.yaml_list.takeItem(self.yaml_list.row(item))
 
+    def _add_pipeline_input(self) -> None:
+        d = QFileDialog.getExistingDirectory(
+            self, "Select input directory", str(REPO_ROOT))
+        if d and not any(
+            self.pipeline_input_list.item(i).text() == d
+            for i in range(self.pipeline_input_list.count())
+        ):
+            self.pipeline_input_list.addItem(d)
+            self._update_output_info()
+
+    def _remove_pipeline_input(self) -> None:
+        for it in self.pipeline_input_list.selectedItems():
+            self.pipeline_input_list.takeItem(self.pipeline_input_list.row(it))
+        self._update_output_info()
+
     # ── Run ──────────────────────────────────────────────────────────────────
 
     def _build_cmd_args(self) -> list[str]:
@@ -1398,8 +1430,9 @@ class RunTab(QWidget):
             args.append("--no-pipeline")
         elif self.rb_pipe_only.isChecked():
             args.append("--no-sim")
-            if self.pipeline_input_edit.text().strip():
-                args += ["--pipeline-input", self.pipeline_input_edit.text().strip()]
+            for i in range(self.pipeline_input_list.count()):
+                args += ["--pipeline-input",
+                         self.pipeline_input_list.item(i).text()]
 
         runner = self.runner_combo.currentText()
         args += ["--runner", runner]
@@ -1502,7 +1535,8 @@ class RunTab(QWidget):
         self.sim_dir_edit.setText(s.value("sim_dir", ""))
         self.inst_edit.setText(s.value("inst_pkgs", ""))
         self.auto_fetch_cb.setChecked(s.value("auto_fetch", False, type=bool))
-        self.pipeline_input_edit.setText(s.value("pipeline_input", ""))
+        for f in (s.value("pipeline_input_dirs") or []):
+            self.pipeline_input_list.addItem(f)
         for f in (s.value("yaml_files") or []):
             self.yaml_list.addItem(f)
 
@@ -1524,7 +1558,10 @@ class RunTab(QWidget):
         s.setValue("sim_dir", self.sim_dir_edit.text())
         s.setValue("inst_pkgs", self.inst_edit.text())
         s.setValue("auto_fetch", self.auto_fetch_cb.isChecked())
-        s.setValue("pipeline_input", self.pipeline_input_edit.text())
+        s.setValue("pipeline_input_dirs", [
+            self.pipeline_input_list.item(i).text()
+            for i in range(self.pipeline_input_list.count())
+        ])
         s.setValue("yaml_files", [
             self.yaml_list.item(i).text() for i in range(self.yaml_list.count())
         ])

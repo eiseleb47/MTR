@@ -25,6 +25,7 @@ from run_metis import (
     collect_tags_from_fits,
     infer_edps_target,
     infer_workflow,
+    parse_args,
     read_edps_port,
 )
 
@@ -544,6 +545,14 @@ class TestBuildSimScript:
         # Should not raise
         ast.parse(script)
 
+    def test_script_with_static_calibs_is_valid_python(self):
+        import ast
+        script = _build_sim_script(
+            **self._base_kwargs,
+            static_calibs_dir="/output/static_calibs",
+        )
+        ast.parse(script)
+
     def test_script_with_inst_pkgs_is_valid_python(self):
         import ast
         script = _build_sim_script(
@@ -585,30 +594,41 @@ class TestBuildSimScript:
         assert "\nimport runSimulationBlock" not in script
 
     def test_script_passes_args_to_runSimulationBlock(self):
-        script = _build_sim_script(**{**self._base_kwargs, "do_static": False})
+        script = _build_sim_script(**self._base_kwargs)
         assert "params, [])" in script
 
-    def test_script_do_static_true(self):
-        script = _build_sim_script(**{**self._base_kwargs, "do_static": True})
-        assert "doStatic  = True" in script
-        # runSimulationBlock() re-parses its third arg with argparse;
-        # --doStatic must be mirrored there to survive the override.
-        assert "params, ['--doStatic'])" in script
+    def test_script_do_static_never_set_in_params(self):
+        # doStatic is always False in the params dict — static calibration
+        # generation is handled separately via the cached generateStaticCalibs
+        # call, not via runSimulationBlock()'s internal doStatic path.
+        for val in (True, False, 1, 0):
+            script = _build_sim_script(**{**self._base_kwargs, "do_static": val})
+            assert "doStatic  = False" in script
+            assert "params, [])" in script
 
-    def test_script_do_static_false(self):
-        script = _build_sim_script(**{**self._base_kwargs, "do_static": False})
-        assert "doStatic  = False" in script
-        assert "params, [])" in script
+    def test_script_generates_static_calibs_to_cache(self):
+        script = _build_sim_script(
+            **{**self._base_kwargs, "do_static": True},
+            static_calibs_dir="/output/static_calibs",
+        )
+        assert "generateStaticCalibs" in script
+        assert "/output/static_calibs" in script
+        # Should check for existing files before regenerating.
+        assert "PERSISTENCE_MAP_LM.fits" in script
 
-    def test_script_do_static_coerces_int(self):
-        # The CLI passes the value as int (0 or 1); the script must still
-        # emit a real Python bool so `if params['doStatic'] == True:` holds.
-        script = _build_sim_script(**{**self._base_kwargs, "do_static": 1})
-        assert "doStatic  = True" in script
-        assert "['--doStatic']" in script
-        script = _build_sim_script(**{**self._base_kwargs, "do_static": 0})
-        assert "doStatic  = False" in script
-        assert "params, [])" in script
+    def test_script_skips_static_calibs_when_disabled(self):
+        script = _build_sim_script(
+            **{**self._base_kwargs, "do_static": False},
+            static_calibs_dir="/output/static_calibs",
+        )
+        assert "generateStaticCalibs" not in script
+
+    def test_script_skips_static_calibs_when_no_cache_dir(self):
+        script = _build_sim_script(
+            **{**self._base_kwargs, "do_static": True},
+            static_calibs_dir=None,
+        )
+        assert "generateStaticCalibs" not in script
 
     def test_script_sys_path_uses_sims_root(self):
         script = _build_sim_script(**self._base_kwargs)
@@ -757,3 +777,32 @@ class TestLookupTableConsistency:
                     assert meta == "qc1calib", (
                         f"LSS task {name!r} in {wf!r} expected qc1calib, got {meta!r}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# --pipeline-input  (multi-directory support)
+# ---------------------------------------------------------------------------
+
+class TestPipelineInputArg:
+    """Verify that --pipeline-input accepts multiple directories via action='append'."""
+
+    def test_single_pipeline_input(self):
+        args = parse_args(["--no-sim", "--pipeline-input", "/tmp/a"])
+        assert args.pipeline_input == ["/tmp/a"]
+
+    def test_multiple_pipeline_inputs(self):
+        args = parse_args([
+            "--no-sim",
+            "--pipeline-input", "/tmp/a",
+            "--pipeline-input", "/tmp/b",
+        ])
+        assert args.pipeline_input == ["/tmp/a", "/tmp/b"]
+
+    def test_no_pipeline_input_is_none(self):
+        args = parse_args(["--no-sim"])
+        assert args.pipeline_input is None
+
+    def test_pipeline_input_without_no_sim(self):
+        """--pipeline-input is accepted even without --no-sim (main() ignores it)."""
+        args = parse_args(["--pipeline-input", "/tmp/a", "file.yaml"])
+        assert args.pipeline_input == ["/tmp/a"]

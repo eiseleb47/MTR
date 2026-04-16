@@ -408,18 +408,24 @@ def infer_edps_target(workflow, data_tags, has_science):
 # ---------------------------------------------------------------------------
 
 def _build_sim_script(out_dir, do_calib, do_static, n_cores, yaml_list,
-                      inst_pkgs_path=None, sims_root=None):
+                      inst_pkgs_path=None, sims_root=None,
+                      static_calibs_dir=None):
     """Return the simulation driver script as a string.
 
     When *inst_pkgs_path* is given (metapkg and native runners) the script
     overrides ScopeSim's local_packages_path and auto-downloads the instrument
     packages into that directory if the METIS package is not yet present.
-    """
-    # runSimulationBlock() re-parses its third arg with argparse; --doStatic
-    # uses action="store_true" (default False), so passing [] silently
-    # overwrites params['doStatic'] back to False.  Mirror the flag here.
-    _sim_args = ["--doStatic"] if do_static else []
 
+    When *static_calibs_dir* is given (and *do_static* is true) the script
+    generates static calibration prototypes (PERSISTENCE_MAP, ATM_PROFILE, …)
+    into that directory instead of the simulation output, reusing any files
+    that already exist there.  This avoids regenerating ~200 MB of FITS files
+    on every run.
+    """
+    # Static calibration generation is handled separately (see end of script)
+    # so we never let runSimulationBlock() do it via doStatic.  The upstream
+    # code re-parses its third arg with argparse where --doStatic defaults to
+    # False, silently overwriting the params dict — but that's moot now.
     path_entry = str(sims_root) if sims_root is not None else "python"
     # metis_simulations submodules read DEFAULT_IRDB_LOCATION at import time;
     # it must be set in the environment before the package is imported.
@@ -502,7 +508,7 @@ def _build_sim_script(out_dir, do_calib, do_static, n_cores, yaml_list,
         "params = dict(",
         f"    outputDir = {out_dir!r},",
         "    small     = False,",
-        f"    doStatic  = {bool(do_static)!r},",
+        "    doStatic  = False,",
         f"    doCalib   = {do_calib!r},",
         "    sequence  = False,",
         "    startMJD  = None,",
@@ -511,7 +517,7 @@ def _build_sim_script(out_dir, do_calib, do_static, n_cores, yaml_list,
         "    testRun   = False,",
         ")",
         "try:",
-        f"    rsb.runSimulationBlock({yaml_list!r}, params, {_sim_args!r})",
+        f"    rsb.runSimulationBlock({yaml_list!r}, params, [])",
         "except ValueError as _exc:",
         "    if 'Package could not be found' in str(_exc):",
         "        import sys as _sys",
@@ -531,6 +537,24 @@ def _build_sim_script(out_dir, do_calib, do_static, n_cores, yaml_list,
         "        print('  On the command line: pass --inst-pkgs <path>.', file=_sys.stderr)",
         "    raise",
     ]
+
+    # --- Static calibration prototypes (cached) -----------------------------
+    # Generate PERSISTENCE_MAP, ATM_PROFILE, REF_STD_CAT, etc. into a shared
+    # cache directory so they survive across runs.  Skip if already present.
+    if do_static and static_calibs_dir is not None:
+        lines += [
+            "",
+            "# --- Generate static calibration prototypes (cached) ---",
+            f"_static_dir = {static_calibs_dir!r}",
+            "if not _os.path.isfile(_os.path.join(_static_dir, 'PERSISTENCE_MAP_LM.fits')):",
+            "    _os.makedirs(_static_dir, exist_ok=True)",
+            "    from metis_simulations import makeCalibPrototypes as _mcp",
+            "    _mcp.generateStaticCalibs(_static_dir)",
+            "    print(f'Generated static calibration prototypes in {_static_dir}')",
+            "else:",
+            "    print(f'Static calibration prototypes already cached in {_static_dir}')",
+        ]
+
     return "\n".join(lines) + "\n"
 
 
@@ -648,7 +672,7 @@ def _restore_association_preference(original: str | None) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -669,10 +693,11 @@ def parse_args():
     )
     p.add_argument(
         "--static", type=int, nargs="?", const=1, default=1, metavar="N",
-        help="Generate static calibration prototypes (PERSISTENCE_MAP_*, "
-             "ATM_PROFILE, REF_STD_CAT, …) into the simulation output "
-             "directory so EDPS can associate them with recipes that expect "
-             "them. Bare --static = 1; --static 0 disables. [default: 1]",
+        help="Ensure static calibration prototypes (PERSISTENCE_MAP_*, "
+             "ATM_PROFILE, REF_STD_CAT, …) exist in a shared cache directory "
+             "(output/static_calibs/) and pass it to EDPS. Files are generated "
+             "once and reused across runs. "
+             "Bare --static = 1; --static 0 disables. [default: 1]",
     )
     p.add_argument(
         "--cores", type=int, default=4, metavar="N",
@@ -685,9 +710,10 @@ def parse_args():
              "with --pipeline-input.",
     )
     p.add_argument(
-        "--pipeline-input", metavar="DIR",
+        "--pipeline-input", metavar="DIR", action="append",
         help="Directory containing FITS files to use as pipeline input. "
-             "Only used with --no-sim. When omitted, defaults to <output>/sim/.",
+             "May be specified multiple times. Only used with --no-sim. "
+             "When omitted, defaults to <output>/sim/.",
     )
     p.add_argument(
         "--no-pipeline", action="store_true",
@@ -750,7 +776,7 @@ def parse_args():
         help="Set EDPS association_preference to 'master_per_quality_level' "
              "for this run, preferring master calibrations over reduced raw data.",
     )
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -854,17 +880,31 @@ def main():
     # When pipeline-only with an explicit input directory, use that as the
     # FITS source instead of <output>/sim/.
     if args.no_sim and args.pipeline_input:
-        sim_out = Path(args.pipeline_input).resolve()
-        if not sim_out.is_dir():
-            sys.exit(f"Error: pipeline input directory not found: {sim_out}")
+        for d in args.pipeline_input:
+            p = Path(d).resolve()
+            if not p.is_dir():
+                sys.exit(f"Error: pipeline input directory not found: {p}")
+        sim_out = Path(args.pipeline_input[0]).resolve()
 
     if not args.no_sim:
         sim_out.mkdir(parents=True, exist_ok=True)
     pipe_out.mkdir(parents=True, exist_ok=True)
 
+    # Shared directory for cached static calibration prototypes.
+    # Placed alongside the per-run output directories so they persist.
+    static_calibs_dir = output_root.parent / "static_calibs"
+
     print(f"\nOutput root      : {output_root}")
-    print(f"  Pipeline input : {sim_out}")
-    print(f"  Pipeline output: {pipe_out}\n")
+    if args.no_sim and args.pipeline_input and len(args.pipeline_input) > 1:
+        for i, d in enumerate(args.pipeline_input):
+            label = "  Pipeline input : " if i == 0 else "                   "
+            print(f"{label}{Path(d).resolve()}")
+    else:
+        print(f"  Pipeline input : {sim_out}")
+    print(f"  Pipeline output: {pipe_out}")
+    if args.static:
+        print(f"  Static calibs  : {static_calibs_dir}")
+    print()
 
     # -----------------------------------------------------------------------
     # Step 1: Simulations
@@ -884,13 +924,14 @@ def main():
             # ./inst_pkgs relative to sims_cwd inside the container.
             inst_pkgs_path = None
         sim_code = _build_sim_script(
-            out_dir        = str(sim_out),
-            do_calib       = args.calib,
-            do_static      = args.static,
-            n_cores        = args.cores,
-            yaml_list      = [str(p) for p in yaml_files],
-            inst_pkgs_path = inst_pkgs_path,
-            sims_root      = sims_root,
+            out_dir            = str(sim_out),
+            do_calib           = args.calib,
+            do_static          = args.static,
+            n_cores            = args.cores,
+            yaml_list          = [str(p) for p in yaml_files],
+            inst_pkgs_path     = inst_pkgs_path,
+            sims_root          = sims_root,
+            static_calibs_dir  = str(static_calibs_dir),
         )
 
         print("=== Running simulations ===")
@@ -933,16 +974,26 @@ def main():
         # When re-using existing FITS (--no-sim), classify them from headers
         # to determine which pipeline tasks apply.
         if args.no_sim:
-            fits_tags = collect_tags_from_fits(sim_out)
+            # Scan all pipeline input directories for FITS tags/workflow.
+            input_dirs = ([str(Path(d).resolve()) for d in args.pipeline_input]
+                          if args.pipeline_input else [str(sim_out)])
+            fits_tags = set()
+            for d in input_dirs:
+                fits_tags |= collect_tags_from_fits(d)
             if fits_tags:
                 print(f"  FITS tags found : {sorted(fits_tags)}")
             data_tags = yaml_tags | fits_tags
             if workflow is None:
-                try:
-                    workflow = infer_workflow_from_fits(sim_out)
-                    print(f"  Workflow  : {workflow}")
-                except ValueError as exc:
-                    sys.exit(f"Error: {exc}")
+                last_err = None
+                for d in input_dirs:
+                    try:
+                        workflow = infer_workflow_from_fits(d)
+                        print(f"  Workflow  : {workflow}")
+                        break
+                    except ValueError as exc:
+                        last_err = exc
+                if workflow is None and last_err is not None:
+                    sys.exit(f"Error: {last_err}")
         else:
             data_tags = yaml_tags
 
@@ -977,13 +1028,23 @@ def main():
             _restore_association_preference(original_pref)
             sys.exit(f"Error: EDPS server failed to start (exit code {rc}).")
 
+        # Build EDPS input directories: sim output + any extra dirs + static
+        # calibs cache.  EDPS uses nargs='*' for -i, so all paths must follow
+        # a single -i flag (a second -i would replace the first, not append).
+        edps_inputs = ["-i", str(sim_out)]
+        if args.no_sim and args.pipeline_input:
+            for d in args.pipeline_input[1:]:
+                edps_inputs.append(str(Path(d).resolve()))
+        if args.static and static_calibs_dir.is_dir():
+            edps_inputs.append(str(static_calibs_dir))
+
         pipeline_rc = 1
         try:
             print("=== Running EDPS pipeline ===")
             pipeline_rc = subprocess.run(
                 edps_cmd + [
                     "-w", workflow,
-                    "-i", str(sim_out),
+                ] + edps_inputs + [
                     "-o", str(pipe_out),
                 ] + target_flags,
                 cwd=edps_cwd,
