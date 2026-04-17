@@ -27,4 +27,4 @@ extra-index-url = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src"]

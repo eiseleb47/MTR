@@ -22,7 +22,7 @@ from typing import Callable
 # Paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).parent.resolve()
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Section A — MetisWISE availability & installation

@@ -7,7 +7,7 @@
   <a href="https://github.com/eiseleb47/MTR"><img src="https://img.shields.io/badge/platform-linux-fab387?style=for-the-badge&labelColor=1e1e2e&logo=linux&logoColor=cdd6f4" alt="Platform"></a>
 </p>
 
-A graphical front-end for end-to-end testing of the [METIS instrument pipeline](https://github.com/AstarVienna/METIS_Pipeline). It generates synthetic FITS observations via [ScopeSim](https://scopesim.readthedocs.io/) and then runs the matching [EDPS](https://www.eso.org/sci/software/edps/) reduction workflow — all from a single, self-contained GUI. A command-line interface (`run_metis.py`) is also shipped as a fallback for scripted or headless use.
+A graphical front-end for end-to-end testing of the [METIS instrument pipeline](https://github.com/AstarVienna/METIS_Pipeline). It generates synthetic FITS observations via [ScopeSim](https://scopesim.readthedocs.io/) and then runs the matching [EDPS](https://www.eso.org/sci/software/edps/) reduction workflow — all from a single, self-contained GUI. A command-line interface (`src/run_metis.py`) is also shipped as a fallback for scripted or headless use.
 
 ## Quick Start
 
@@ -52,7 +52,7 @@ Re-running is safe — existing repositories are updated in place rather than re
 
 ### Run tab
 
-The Run tab wraps `run_metis.py` in a file-picker UI. All CLI options are exposed as form controls; runner-specific fields (container name, meta-package path) show and hide based on the selected runner.
+The Run tab wraps `src/run_metis.py` in a file-picker UI. All CLI options are exposed as form controls; runner-specific fields (container name, meta-package path) show and hide based on the selected runner.
 
 Workflow:
 
@@ -98,7 +98,7 @@ If the pipeline tools (`edps`, `python`, ScopeSim) are already on your PATH — 
 
 ScopeSim instrument packages (Armazones, ELT, METIS) will be downloaded into `./inst_pkgs/` in your current working directory on first use. Set the GUI's *Instrument packages* field (or `--inst-pkgs PATH`) to download or reuse packages from a fixed location instead.
 
-> **Tip:** always launch the GUI (or invoke `run_metis.py`) from the same directory — otherwise ScopeSim will download a fresh copy of the instrument packages into every new directory, cluttering your filesystem.
+> **Tip:** always launch the GUI (or invoke `src/run_metis.py`) from the same directory — otherwise ScopeSim will download a fresh copy of the instrument packages into every new directory, cluttering your filesystem.
 
 ## YAML Format
 
@@ -123,7 +123,7 @@ BLOCK_NAME:
     nObs: <int>           # number of exposures to simulate
 ```
 
-See `LMS_RAD_06.yaml` for a complete IFU example covering the full calibration + science chain.
+See `examples/LMS_RAD_06.yaml` for a complete IFU example covering the full calibration + science chain.
 
 ## Supported Workflows
 
@@ -149,10 +149,10 @@ The GUI displays the resolved paths live under the *Output directory* field so y
 
 ## Command-Line Fallback
 
-`run_metis.py` is the headless interface that the GUI drives under the hood. It is useful for scripting, CI jobs, and SSH sessions without a display. It accepts the same options as the GUI.
+`src/run_metis.py` is the headless interface that the GUI drives under the hood. It is useful for scripting, CI jobs, and SSH sessions without a display. It accepts the same options as the GUI.
 
 ```bash
-python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
+python src/run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
 ```
 
 ### Options
@@ -185,42 +185,50 @@ python run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
 
 ```bash
 # Full run with metis-meta-package (default)
-python run_metis.py LMS_RAD_06.yaml
+python src/run_metis.py examples/LMS_RAD_06.yaml
 
 # Inside a container or bare-metal install (tools on PATH)
-python run_metis.py --runner native LMS_RAD_06.yaml
+python src/run_metis.py --runner native examples/LMS_RAD_06.yaml
 
 # Exec into a running Docker container from the host
-python run_metis.py --runner docker --container metis-pipeline LMS_RAD_06.yaml
+python src/run_metis.py --runner docker --container metis-pipeline examples/LMS_RAD_06.yaml
 
 # Exec into a running Podman container; set runner via env var
-METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python run_metis.py LMS_RAD_06.yaml
+METIS_RUNNER=podman METIS_CONTAINER=metis-pipeline python src/run_metis.py examples/LMS_RAD_06.yaml
 
 # Multiple YAML files, custom output dir, with auto-calibration frames
-python run_metis.py -o /tmp/myrun --calib obs1.yaml obs2.yaml
+python src/run_metis.py -o /tmp/myrun --calib obs1.yaml obs2.yaml
 
 # Crank up parallelism for big simulation batches
-python run_metis.py --cores 12 LMS_RAD_06.yaml
+python src/run_metis.py --cores 12 examples/LMS_RAD_06.yaml
 
 # Only simulate, inspect the FITS files manually
-python run_metis.py --no-pipeline LMS_RAD_06.yaml
+python src/run_metis.py --no-pipeline examples/LMS_RAD_06.yaml
 
 # Only run the pipeline on previously simulated data
-python run_metis.py --no-sim -o /tmp/myrun LMS_RAD_06.yaml
+python src/run_metis.py --no-sim -o /tmp/myrun examples/LMS_RAD_06.yaml
 
 # Pipeline-only with FITS files from a custom location
-python run_metis.py --no-sim --pipeline-input /data/sim_fits -o /tmp/myrun
+python src/run_metis.py --no-sim --pipeline-input /data/sim_fits -o /tmp/myrun
 ```
 
 ## Repository Layout
 
 ```
 MTR/
-├── gui.py                  # Graphical front-end (PyQt6) — primary entry point
-├── launch.sh               # GUI launcher (installs uv if missing, then runs gui.py)
-├── run_metis.py            # Headless CLI (used directly or wrapped by the GUI)
-├── LMS_RAD_06.yaml         # Full IFU observation sequence (reference example)
-└── podman-compose.yml      # Container environment for isolated runs
+├── src/
+│   ├── gui.py              # Graphical front-end (PyQt6) — primary entry point
+│   ├── run_metis.py        # Headless CLI (used directly or wrapped by the GUI)
+│   └── archive.py          # MetisWISE archive integration
+├── container/
+│   ├── Dockerfile          # Ubuntu 24.04 GUI container (Qt6 / Wayland)
+│   └── compose.yml         # Podman / Docker Compose for the GUI service
+├── examples/
+│   ├── small_test.yaml     # Minimal test configuration (two blocks)
+│   └── LMS_RAD_06.yaml     # Full IFU observation sequence (reference example)
+├── tests/                  # Unit tests (pytest)
+├── launch.sh               # GUI launcher (installs uv if missing, then runs the GUI)
+└── pyproject.toml          # Project metadata and dependency groups
 ```
 
 ## Related Repositories

@@ -1,0 +1,44 @@
+LMS_RAD_01_DARK_IFU_RAW_03:
+  do.catg: DARK_IFU_RAW
+  mode: "wcu_lms"
+  source: 
+    name: empty_sky
+    kwargs: {}
+  properties:
+    dit: 40
+    ndit: 3
+    wavelen: 3.555
+    filter_name: "open"
+    ndfilter_name: "open"
+    tech: "LMS"
+    type: "DARK"
+    catg: "CALIB"
+    tplname: "METIS_img_lms_det_dark"
+    nObs: 2
+    detector_readout_mode: "slow"
+
+DETLIN_IFU_RAW1:
+  do.catg: DETLIN_IFU_RAW
+  mode: "wcu_lms"
+  source:
+    name: empty_sky
+    kwargs: {}
+  properties:
+    dit: 1.3
+    ndit: 4
+    wavelen: 5.2294
+    filter_name: "open"
+    ndfilter_name: "open"
+    detector_readout_mode: "slow"
+    catg: "CALIB"
+    tech: "LMS"
+    type: "DETLIN"
+    tplname: "METIS_ifu_cal_DetLin"
+    nObs: 2
+  wcu:
+    current_lamp: "bb"
+    current_fpmask: "open"
+    bb_aperture: 1.0
+    bb_temp: 750
+    is_temp: 300
+    wcu_temp: 300

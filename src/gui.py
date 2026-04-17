@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 # Paths
 # ---------------------------------------------------------------------------
 
-REPO_ROOT   = Path(__file__).parent.resolve()
+REPO_ROOT   = Path(__file__).resolve().parent.parent
 META_PKG    = Path(os.environ.get("METIS_META_PKG", str(REPO_ROOT / "metis-meta-package")))
 TARGET_A    = REPO_ROOT / "METIS_Pipeline"
 TARGET_B    = REPO_ROOT / "METIS_Simulations"
@@ -1428,7 +1428,7 @@ class RunTab(QWidget):
         self.log_view.clear()
 
         args = self._build_cmd_args()
-        script = str(REPO_ROOT / "run_metis.py")
+        script = str(REPO_ROOT / "src" / "run_metis.py")
 
         self._process = QProcess(self)
         self._process.setWorkingDirectory(str(REPO_ROOT))

@@ -7,9 +7,9 @@ _run_gui() {
     cd "$SCRIPT_DIR"
     uv sync --inexact
     if [[ -n "${SMOKE_TEST:-}" ]]; then
-        exec .venv/bin/python gui.py --smoke-test
+        exec .venv/bin/python src/gui.py --smoke-test
     fi
-    exec .venv/bin/python gui.py
+    exec .venv/bin/python src/gui.py
 }
 
 # Check PATH

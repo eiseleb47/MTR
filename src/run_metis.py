@@ -918,7 +918,7 @@ def main():
             inst_pkgs_path = args.inst_pkgs if runner in ("docker", "podman") \
                              else str(Path(args.inst_pkgs).resolve())
         elif runner == "metapkg":
-            inst_pkgs_path = str(Path(__file__).parent.resolve() / "inst_pkgs")
+            inst_pkgs_path = str(Path(__file__).resolve().parent.parent / "inst_pkgs")
         elif runner == "native":
             inst_pkgs_path = str(Path.cwd() / "inst_pkgs")
         else:
