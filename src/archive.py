@@ -150,22 +150,34 @@ def upload_files(
     return ingested
 
 
+def _resolve_dataitem_class(name: str, dataitem_cls: type) -> type | None:
+    """Walk DataItem subclasses recursively to find one matching *name*."""
+    for sub in dataitem_cls.__subclasses__():
+        if sub.__name__ == name:
+            return sub
+        found = _resolve_dataitem_class(name, sub)
+        if found is not None:
+            return found
+    return None
+
+
 def query_archive(
-    pro_catg: str | None = None,
+    category: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> list[dict]:
     """Query the archive database for available files.
 
-    If *pro_catg* is given, filters by ``PRO.CATG`` value (master product
-    category).  Returns a list of dicts with ``filename``, ``pro_catg``,
-    and ``class_name`` keys.
+    If *category* is given it is resolved as a ``DataItem`` subclass name
+    (e.g. ``"LINEARITY_2RG"``, ``"IFU_SCI_RAW"``) and ``.select_all()``
+    is called on that class.  This works for raw, static-calibration, and
+    processed products alike.  Returns a list of dicts with ``filename``,
+    ``pro_catg``, and ``class_name`` keys.
     """
     _ensure_awetarget()
 
     try:
         import metiswise.main.aweimports  # noqa: F401 — registers DataItem subclasses
         from metiswise.main.dataitem import DataItem
-        from metiswise.main.pro import Pro
     except ImportError as exc:
         raise RuntimeError(
             "MetisWISE is not installed.  Use the Archive tab to install it."
@@ -175,8 +187,13 @@ def query_archive(
         on_log("Querying archive…")
 
     try:
-        if pro_catg:
-            results = (Pro.pro_catg == pro_catg)
+        if category:
+            cls = _resolve_dataitem_class(category, DataItem)
+            if cls is None:
+                if on_log:
+                    on_log(f"Unknown category: {category}")
+                return []
+            results = cls.select_all()
         else:
             results = DataItem.select_all()
 
@@ -263,7 +280,7 @@ def list_available_masters(
         pro_catg = TASK_TO_MASTER_PROCATG.get(task_name)
         if not pro_catg:
             continue
-        items = query_archive(pro_catg=pro_catg, on_log=on_log)
+        items = query_archive(category=pro_catg, on_log=on_log)
         if items:
             result[pro_catg] = [it["filename"] for it in items]
     return result
@@ -401,7 +418,7 @@ def fetch_missing_calibrations(
     for task_name, pro_catg in missing:
         if on_log:
             on_log(f"Searching archive for {pro_catg}…")
-        items = query_archive(pro_catg=pro_catg, on_log=on_log)
+        items = query_archive(category=pro_catg, on_log=on_log)
         if not items:
             if on_log:
                 on_log(f"  No {pro_catg} found in archive — skipping")

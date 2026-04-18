@@ -217,28 +217,114 @@ class TestQueryArchive:
 
             importlib.reload(archive)
 
-    def test_query_by_pro_catg(self):
+    def test_query_by_category(self):
         mock_item = MagicMock()
         mock_item.filename = "master.fits"
         mock_item.pro_catg = "MASTER_DARK"
-        type(mock_item).__name__ = "Pro"
 
-        mock_pro = MagicMock()
-        mock_pro.pro_catg.__eq__ = MagicMock(return_value=[mock_item])
+        class _DataItem:
+            pass
+
+        class MASTER_DARK(_DataItem):
+            @classmethod
+            def select_all(cls):
+                return [mock_item]
 
         with patch.dict("sys.modules", {
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
-            "metiswise.main.dataitem": MagicMock(),
-            "metiswise.main.pro": MagicMock(Pro=mock_pro),
+            "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
         }):
             import importlib
             importlib.reload(archive)
 
-            items = archive.query_archive(pro_catg="MASTER_DARK")
+            items = archive.query_archive(category="MASTER_DARK")
             assert len(items) == 1
             assert items[0]["filename"] == "master.fits"
+
+            importlib.reload(archive)
+
+    def test_query_raw_category(self):
+        mock_item = MagicMock()
+        mock_item.filename = "raw.fits"
+        mock_item.pro_catg = AttributeError  # raw items have no pro_catg
+        del mock_item.pro_catg
+
+        class _DataItem:
+            pass
+
+        class IFU_SCI_RAW(_DataItem):
+            @classmethod
+            def select_all(cls):
+                return [mock_item]
+
+        with patch.dict("sys.modules", {
+            "metiswise": MagicMock(),
+            "metiswise.main": MagicMock(),
+            "metiswise.main.aweimports": MagicMock(),
+            "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
+        }):
+            import importlib
+            importlib.reload(archive)
+
+            items = archive.query_archive(category="IFU_SCI_RAW")
+            assert len(items) == 1
+            assert items[0]["filename"] == "raw.fits"
+            assert items[0]["pro_catg"] == ""
+
+            importlib.reload(archive)
+
+    def test_query_unknown_category(self):
+        class _DataItem:
+            pass
+
+        with patch.dict("sys.modules", {
+            "metiswise": MagicMock(),
+            "metiswise.main": MagicMock(),
+            "metiswise.main.aweimports": MagicMock(),
+            "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
+        }):
+            import importlib
+            importlib.reload(archive)
+
+            logs = []
+            items = archive.query_archive(
+                category="NONEXISTENT", on_log=logs.append,
+            )
+            assert items == []
+            assert any("Unknown category" in msg for msg in logs)
+
+            importlib.reload(archive)
+
+    def test_query_resolves_nested_subclass(self):
+        mock_item = MagicMock()
+        mock_item.filename = "nested.fits"
+        mock_item.pro_catg = "LINEARITY_2RG"
+
+        class _DataItem:
+            pass
+
+        class _Intermediate(_DataItem):
+            pass
+
+        class LINEARITY_2RG(_Intermediate):
+            @classmethod
+            def select_all(cls):
+                return [mock_item]
+
+        with patch.dict("sys.modules", {
+            "metiswise": MagicMock(),
+            "metiswise.main": MagicMock(),
+            "metiswise.main.aweimports": MagicMock(),
+            "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
+        }):
+            import importlib
+            importlib.reload(archive)
+
+            items = archive.query_archive(category="LINEARITY_2RG")
+            assert len(items) == 1
+            assert items[0]["filename"] == "nested.fits"
 
             importlib.reload(archive)
 

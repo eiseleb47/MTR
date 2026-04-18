@@ -745,15 +745,15 @@ class QueryWorker(QThread):
     results = pyqtSignal(list)
     done    = pyqtSignal(bool)
 
-    def __init__(self, pro_catg: str | None = None) -> None:
+    def __init__(self, category: str | None = None) -> None:
         super().__init__()
-        self._pro_catg = pro_catg
+        self._category = category
 
     def run(self) -> None:
         from archive import query_archive
         try:
             items = query_archive(
-                pro_catg=self._pro_catg,
+                category=self._category,
                 on_log=lambda msg: self.log.emit(msg + "\n", ""),
             )
             self.results.emit(items)
@@ -913,7 +913,7 @@ class ArchiveTab(QWidget):
 
         # Filter row
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("PRO.CATG:"))
+        filter_row.addWidget(QLabel("Category:"))
         self._catg_combo = QComboBox()
         self._catg_combo.setEditable(True)
         self._catg_combo.setMinimumWidth(200)
@@ -921,6 +921,10 @@ class ArchiveTab(QWidget):
         from archive import TASK_TO_MASTER_PROCATG
         for catg in sorted(set(TASK_TO_MASTER_PROCATG.values())):
             self._catg_combo.addItem(catg)
+        self._catg_combo.insertSeparator(self._catg_combo.count())
+        from run_metis import DPR_TO_TAG
+        for tag in sorted(set(DPR_TO_TAG.values())):
+            self._catg_combo.addItem(tag)
         filter_row.addWidget(self._catg_combo)
         filter_row.addSpacing(12)
         filter_row.addWidget(QLabel("Filename:"))
@@ -1030,12 +1034,12 @@ class ArchiveTab(QWidget):
         self._archive_list.clear()
         self._refresh_btn.setEnabled(False)
         catg_text = self._catg_combo.currentText().strip()
-        pro_catg = None if catg_text in ("", "(all)") else catg_text
-        if pro_catg:
-            log_append(self._log1, f"Querying archive for PRO.CATG={pro_catg}…\n", "cyan")
+        category = None if catg_text in ("", "(all)") else catg_text
+        if category:
+            log_append(self._log1, f"Querying archive for {category}…\n", "cyan")
         else:
             log_append(self._log1, "Querying archive (all items)…\n", "cyan")
-        self._worker = QueryWorker(pro_catg=pro_catg)
+        self._worker = QueryWorker(category=category)
         self._worker.log.connect(lambda t, c: log_append(self._log1, t, c))
         self._worker.results.connect(self._on_query_results)
         self._worker.done.connect(lambda _ok: self._refresh_btn.setEnabled(True))
@@ -1054,7 +1058,7 @@ class ArchiveTab(QWidget):
             label = it.get("filename", "?")
             if needle and needle not in label.lower():
                 continue
-            catg = it.get("pro_catg", "")
+            catg = it.get("pro_catg", "") or it.get("class_name", "")
             if catg:
                 label += f"  [{catg}]"
             self._archive_list.addItem(label)
