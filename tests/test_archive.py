@@ -5,17 +5,32 @@ Covers:
   - MetisWISE availability check
   - Install command generation
   - Stale Environment.cfg detection
+  - Podman availability & install command detection
+  - Container image / pod management helpers
+  - Database credential writing (remote & local modes)
   - Upload / query / download with mocked MetisWISE
   - Missing calibration identification
 """
 
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 import archive
+
+# Mocks for the commonwise database modules imported by _ensure_db_connection().
+# Merge into every patch.dict("sys.modules", …) block that exercises upload,
+# query, or download functions.
+_DB_MOCKS = {
+    "common": MagicMock(),
+    "common.config": MagicMock(),
+    "common.config.Profile": MagicMock(),
+    "common.database": MagicMock(),
+    "common.database.Database": MagicMock(),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +124,263 @@ class TestCheckStaleEnvironmentCfg:
             assert warning is not None
             assert "dataserver" in warning
 
+    def test_localhost_not_stale(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        (awe / "Environment.cfg").write_text(
+            "data_server : localhost\ndata_port : 8013\n"
+        )
+        with patch("archive.Path.home", return_value=tmp_path):
+            assert archive.check_stale_environment_cfg() is None
+
+
+# ---------------------------------------------------------------------------
+# Database connection setup
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureDbConnection:
+    def test_creates_profile_and_connects(self):
+        mock_profiles = MagicMock()
+        mock_database = MagicMock()
+
+        with patch.dict("sys.modules", {
+            "common": MagicMock(),
+            "common.config": MagicMock(),
+            "common.config.Profile": MagicMock(profiles=mock_profiles),
+            "common.database": MagicMock(),
+            "common.database.Database": MagicMock(database=mock_database),
+        }):
+            import importlib
+            importlib.reload(archive)
+
+            archive._ensure_db_connection()
+            mock_profiles.create_profile.assert_called_once()
+            mock_database.connect.assert_called_once()
+
+            importlib.reload(archive)
+
+    def test_idempotent_within_thread(self):
+        mock_profiles = MagicMock()
+        mock_database = MagicMock()
+
+        with patch.dict("sys.modules", {
+            "common": MagicMock(),
+            "common.config": MagicMock(),
+            "common.config.Profile": MagicMock(profiles=mock_profiles),
+            "common.database": MagicMock(),
+            "common.database.Database": MagicMock(database=mock_database),
+        }):
+            import importlib
+            importlib.reload(archive)
+
+            archive._ensure_db_connection()
+            archive._ensure_db_connection()
+            # Only called once despite two invocations
+            mock_profiles.create_profile.assert_called_once()
+            mock_database.connect.assert_called_once()
+
+            importlib.reload(archive)
+
+    def test_noop_when_commonwise_missing(self):
+        # No common.* modules mocked — ImportError path fires
+        import importlib
+        importlib.reload(archive)
+
+        # Should not raise; just sets db_ready and returns
+        archive._ensure_db_connection()
+        assert archive._thread_local.db_ready is True
+
+        importlib.reload(archive)
+
+
+class TestResetDbConnection:
+    def test_clears_flag(self):
+        archive._thread_local.db_ready = True
+        archive.reset_db_connection()
+        assert not getattr(archive._thread_local, "db_ready", False)
+
+
+class TestWriteDbCredentials:
+    def test_writes_config(self, tmp_path):
+        with patch("archive.Path.home", return_value=tmp_path):
+            cfg = archive.write_db_credentials("AWAITTEST", "secret")
+        assert cfg.exists()
+        text = cfg.read_text()
+        assert text.startswith("[global]\n")
+        assert "database_user : AWAITTEST" in text
+        assert "database_password : secret" in text
+
+    def test_creates_awe_dir(self, tmp_path):
+        with patch("archive.Path.home", return_value=tmp_path):
+            archive.write_db_credentials("user", "pass")
+        assert (tmp_path / ".awe").is_dir()
+
+    def test_remote_mode_minimal(self, tmp_path):
+        """Without host=, only username and password are written."""
+        with patch("archive.Path.home", return_value=tmp_path):
+            cfg = archive.write_db_credentials("USER", "PW")
+        text = cfg.read_text()
+        assert "database_name" not in text
+        assert "data_server" not in text
+
+    def test_local_mode_full_config(self, tmp_path):
+        """With host='localhost', a complete Environment.cfg is written."""
+        with patch("archive.Path.home", return_value=tmp_path):
+            cfg = archive.write_db_credentials(
+                "AWTEST", "lmno", host="localhost",
+            )
+        text = cfg.read_text()
+        assert "database_name : localhost/wise" in text
+        assert "database_engine : postgresql" in text
+        assert "database_user : AWTEST" in text
+        assert "database_password : lmno" in text
+        assert "data_server : localhost" in text
+        assert "data_port : 8013" in text
+        assert "data_protocol : https" in text
+        assert "project : SIM" in text
+
+    def test_local_mode_custom_data_server(self, tmp_path):
+        with patch("archive.Path.home", return_value=tmp_path):
+            cfg = archive.write_db_credentials(
+                "U", "P", host="myhost",
+                data_server="ds.example.com", data_port=9999,
+            )
+        text = cfg.read_text()
+        assert "database_name : myhost/wise" in text
+        assert "data_server : ds.example.com" in text
+        assert "data_port : 9999" in text
+
+
+# ---------------------------------------------------------------------------
+# Podman availability & install command
+# ---------------------------------------------------------------------------
+
+
+class TestPodmanAvailable:
+    def test_available(self):
+        with patch("archive.shutil.which", return_value="/usr/bin/podman"):
+            assert archive.podman_available() is True
+
+    def test_not_available(self):
+        with patch("archive.shutil.which", return_value=None):
+            assert archive.podman_available() is False
+
+
+class TestDetectPodmanInstallCmd:
+    def _mock_os_release(self, tmp_path, distro_id, id_like=""):
+        content = f'ID={distro_id}\n'
+        if id_like:
+            content += f'ID_LIKE="{id_like}"\n'
+        (tmp_path / "os-release").write_text(content)
+        return tmp_path / "os-release"
+
+    def _run_with_os_release(self, tmp_path, content):
+        """Write a fake /etc/os-release and run detect_podman_install_cmd."""
+        os_release = tmp_path / "os-release"
+        os_release.write_text(content)
+        with patch("archive.Path", return_value=os_release):
+            return archive.detect_podman_install_cmd()
+
+    def test_debian(self, tmp_path):
+        cmd = self._run_with_os_release(tmp_path, 'ID=debian\n')
+        assert cmd == ["pkexec", "apt-get", "install", "-y", "podman"]
+
+    def test_ubuntu(self, tmp_path):
+        cmd = self._run_with_os_release(tmp_path, 'ID=ubuntu\nID_LIKE="debian"\n')
+        assert "apt-get" in cmd
+
+    def test_kali(self, tmp_path):
+        cmd = self._run_with_os_release(tmp_path, 'ID=kali\nID_LIKE="debian"\n')
+        assert "apt-get" in cmd
+
+    def test_fedora(self, tmp_path):
+        cmd = self._run_with_os_release(tmp_path, 'ID=fedora\n')
+        assert "dnf" in cmd
+
+    def test_arch(self, tmp_path):
+        cmd = self._run_with_os_release(tmp_path, 'ID=arch\n')
+        assert "pacman" in cmd
+
+    def test_unknown_raises(self, tmp_path):
+        os_release = tmp_path / "os-release"
+        os_release.write_text('ID=obscure\n')
+        with patch("archive.Path", return_value=os_release):
+            with pytest.raises(RuntimeError, match="Cannot determine"):
+                archive.detect_podman_install_cmd()
+
+
+# ---------------------------------------------------------------------------
+# Container image & pod status helpers
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveImageExists:
+    def test_exists(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert archive.archive_image_exists() is True
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            assert cmd[:3] == ["podman", "image", "exists"]
+
+    def test_not_exists(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            assert archive.archive_image_exists() is False
+
+    def test_no_podman(self):
+        with patch("archive.podman_available", return_value=False):
+            assert archive.archive_image_exists() is False
+
+
+class TestArchivePodRunning:
+    def test_running(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="Running\n",
+            )
+            assert archive.archive_pod_running() is True
+
+    def test_stopped(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="Exited\n",
+            )
+            assert archive.archive_pod_running() is False
+
+    def test_no_pod(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=125)
+            assert archive.archive_pod_running() is False
+
+    def test_no_podman(self):
+        with patch("archive.podman_available", return_value=False):
+            assert archive.archive_pod_running() is False
+
+
+class TestDbInitialized:
+    def test_initialized(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert archive.db_initialized() is True
+
+    def test_not_initialized(self):
+        with patch("archive.podman_available", return_value=True), \
+             patch("archive.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=2)
+            assert archive.db_initialized() is False
+
+    def test_no_podman(self):
+        with patch("archive.podman_available", return_value=False):
+            assert archive.db_initialized() is False
+
 
 # ---------------------------------------------------------------------------
 # Upload files (mocked MetisWISE)
@@ -137,6 +409,7 @@ class TestUploadFiles:
         mock_mw_main.pro = MagicMock()
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "astropy": MagicMock(),
             "astropy.io": mock_astropy_io,
             "astropy.io.fits": mock_fits,
@@ -167,6 +440,7 @@ class TestUploadFiles:
         mock_fits.open.return_value = mock_hdus
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "astropy": MagicMock(),
             "astropy.io": MagicMock(),
             "astropy.io.fits": mock_fits,
@@ -202,6 +476,7 @@ class TestQueryArchive:
         mock_dataitem.select_all.return_value = [mock_item]
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
@@ -231,6 +506,7 @@ class TestQueryArchive:
                 return [mock_item]
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
@@ -260,6 +536,7 @@ class TestQueryArchive:
                 return [mock_item]
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
@@ -280,6 +557,7 @@ class TestQueryArchive:
             pass
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
@@ -314,6 +592,7 @@ class TestQueryArchive:
                 return [mock_item]
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.aweimports": MagicMock(),
@@ -352,6 +631,7 @@ class TestDownloadFile:
         dest_dir = tmp_path / "downloads"
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=mock_dataitem),
@@ -374,6 +654,7 @@ class TestDownloadFile:
         dest_dir = tmp_path / "downloads"
 
         with patch.dict("sys.modules", {
+            **_DB_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=mock_dataitem),

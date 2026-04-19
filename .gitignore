@@ -1,6 +1,7 @@
 # External repositories (cloned separately via metis-meta-package bootstrap)
 METIS_Pipeline/
 METIS_Simulations/
+METIS_DRLD/
 metis-meta-package/
 MetisWISE/
 inst_pkgs/

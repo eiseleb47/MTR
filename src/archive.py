@@ -1,13 +1,14 @@
 """archive.py — METIS archive integration module
 
-Provides MetisWISE installation helpers, archive data server client
-operations, and master-calibration auto-download logic.  Archive operations
-call the MetisWISE Python API directly (the package must be pip-installed
-into the project venv).
+Provides MetisWISE installation helpers, Podman container management for a
+local PostgreSQL + dataserver archive, archive data server client operations,
+and master-calibration auto-download logic.  Archive operations call the
+MetisWISE Python API directly (the package must be pip-installed into the
+project venv).
 
-The MetisWISE package ships with a production ``Environment.cfg`` that
-points to the METIS AIT archive servers.  A user-local override can be
-placed in ``~/.awe/Environment.cfg`` if needed.
+A local archive pod (managed by Podman) provides both a PostgreSQL database
+and a commonwise dataserver.  ``~/.awe/Environment.cfg`` is pointed at
+``localhost`` to connect.
 """
 
 from __future__ import annotations
@@ -15,6 +16,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -66,25 +71,432 @@ def _ensure_awetarget() -> None:
     os.environ.setdefault("AWETARGET", "metiswise")
 
 
+DRLD_DIR = REPO_ROOT / "METIS_DRLD"
+DRLD_REPO_URL = "https://github.com/AstarVienna/METIS_DRLD.git"
+
+_metiswise_imports_done = False
+
+
+def _ensure_metiswise_imports() -> None:
+    """Ensure the ``codes`` package (METIS_DRLD) is importable, then
+    import the full MetisWISE class hierarchy.
+
+    MetisWISE needs ``codes.drld_parser`` from the METIS_DRLD repo to
+    enumerate data products and populate ``Raw.class_from_dpr`` (needed
+    for uploads).  The DRLD parses ``.tex`` files at runtime, so it must
+    be a local clone — ``pip install`` doesn't include them.
+
+    On first call this function clones METIS_DRLD into the project
+    directory if it isn't already present, adds it to ``sys.path``, and
+    imports ``metiswise.main.aweimports``.
+    """
+    global _metiswise_imports_done
+    if _metiswise_imports_done:
+        return
+    _metiswise_imports_done = True
+
+    import sys
+
+    # Make the 'codes' package importable.
+    drld_path = str(DRLD_DIR)
+    if drld_path not in sys.path:
+        sys.path.insert(0, drld_path)
+
+    try:
+        from codes.drld_parser.data_reduction_library_design import (
+            DataReductionLibraryDesign,  # noqa: F401
+        )
+    except ImportError:
+        # METIS_DRLD not cloned yet — fetch it.
+        subprocess.run(
+            ["git", "clone", "--depth", "1", DRLD_REPO_URL, str(DRLD_DIR)],
+            check=True,
+        )
+
+    import metiswise.main.aweimports  # noqa: F401
+
+
+_thread_local = threading.local()
+
+
+def _ensure_db_connection() -> None:
+    """Create a MetisWISE database profile and connection for this thread.
+
+    MetisWISE uses thread-local storage; each new thread must create its
+    own profile and database connection.  Repeated calls on the same
+    thread are no-ops.
+    """
+    if getattr(_thread_local, "db_ready", False):
+        return
+    _ensure_awetarget()
+    try:
+        from common.config.Profile import profiles
+        profiles.create_profile()
+        from common.database.Database import database
+        database.connect()
+    except ImportError:
+        pass
+    _thread_local.db_ready = True
+
+
+def reset_db_connection() -> None:
+    """Force the next archive operation to re-establish the DB connection.
+
+    Call this after writing new credentials to ``~/.awe/Environment.cfg``
+    so that the next ``query_archive`` / ``upload_files`` /
+    ``download_file`` call picks up the updated settings.
+    """
+    _thread_local.db_ready = False
+
+
+def write_db_credentials(
+    username: str,
+    password: str,
+    *,
+    host: str = "",
+    data_server: str = "",
+    data_port: int = 0,
+    data_protocol: str = "https",
+) -> Path:
+    """Write database credentials to ``~/.awe/Environment.cfg``.
+
+    When *host* is empty the file contains only ``database_user`` and
+    ``database_password``, letting all other settings fall through to the
+    production config shipped with MetisWISE.
+
+    When *host* is given (e.g. ``"localhost"`` for a local Podman pod) a
+    full ``Environment.cfg`` is written that also sets ``database_name``,
+    ``database_engine``, ``data_server``, ``data_port``, and ``project``.
+    """
+    awe_dir = Path.home() / ".awe"
+    awe_dir.mkdir(exist_ok=True)
+    cfg = awe_dir / "Environment.cfg"
+
+    if host:
+        cfg.write_text(
+            f"[global]\n"
+            f"database_name : {host}/wise\n"
+            f"database_engine : postgresql\n"
+            f"database_user : {username}\n"
+            f"database_password : {password}\n"
+            f"data_server : {data_server or host}\n"
+            f"data_port : {data_port or 8013}\n"
+            f"data_protocol : {data_protocol}\n"
+            f"project : SIM\n"
+            f"use_n_chars_md5 : 8\n"
+            f"mockcommon :\n"
+            f"use_find_existing :\n"
+            f"use_python_logging : 1\n"
+            f"python_logging_level : INFO\n"
+        )
+    else:
+        cfg.write_text(
+            f"[global]\n"
+            f"database_user : {username}\n"
+            f"database_password : {password}\n"
+        )
+    return cfg
+
+
 def check_stale_environment_cfg() -> str | None:
     """Return a warning message if ``~/.awe/Environment.cfg`` overrides the
     production config with stale container-era settings, else ``None``.
+
+    ``data_server : localhost`` is *not* considered stale — it is the
+    expected value when using the local Podman archive pod.
     """
     cfg = Path.home() / ".awe" / "Environment.cfg"
     if not cfg.exists():
         return None
     try:
         text = cfg.read_text()
+        # "dataserver" (the old compose service hostname) is stale;
+        # "localhost" is valid (local pod).
         if re.search(r"data_server\s*[:=]\s*dataserver\b", text):
             return (
                 f"Warning: {cfg} still points data_server to 'dataserver' "
-                f"(the old container hostname).  This overrides the "
-                f"production config shipped with MetisWISE.  Consider "
-                f"removing or updating {cfg}."
+                f"(the old container hostname).  Consider removing or "
+                f"updating {cfg}."
             )
     except OSError:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Section A2 — Container management (Podman)
+# ---------------------------------------------------------------------------
+
+POD_NAME = "metis-archive"
+DB_CONTAINER = "metis-archive-db"
+DS_CONTAINER = "metis-archive-ds"
+ARCHIVE_IMAGE = "metis-archive"
+DB_VOLUME = "metis-archive-data"
+DS_VOLUME = "metis-archive-space"
+CONTAINERFILE = REPO_ROOT / "container" / "archive" / "Containerfile"
+CONTAINER_CONTEXT = REPO_ROOT / "container" / "archive"
+
+
+def podman_available() -> bool:
+    """Return ``True`` if ``podman`` is on the PATH."""
+    return shutil.which("podman") is not None
+
+
+def detect_podman_install_cmd() -> list[str]:
+    """Return a command to install Podman for the current Linux distro.
+
+    Reads ``/etc/os-release`` to detect the distro family and returns a
+    privilege-escalated install command using ``pkexec``.  Raises
+    ``RuntimeError`` if the distro cannot be detected.
+    """
+    os_release = Path("/etc/os-release")
+    id_like = ""
+    distro_id = ""
+    if os_release.exists():
+        for line in os_release.read_text().splitlines():
+            if line.startswith("ID="):
+                distro_id = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("ID_LIKE="):
+                id_like = line.split("=", 1)[1].strip().strip('"')
+
+    ids = {distro_id} | set(id_like.split())
+
+    if ids & {"debian", "ubuntu", "kali"}:
+        return ["pkexec", "apt-get", "install", "-y", "podman"]
+    if ids & {"fedora", "rhel", "centos"}:
+        return ["pkexec", "dnf", "install", "-y", "podman"]
+    if ids & {"arch", "manjaro"}:
+        return ["pkexec", "pacman", "-S", "--noconfirm", "podman"]
+
+    raise RuntimeError(
+        f"Cannot determine Podman install command for distro '{distro_id}' "
+        f"(ID_LIKE='{id_like}'). Install Podman manually."
+    )
+
+
+def archive_image_exists() -> bool:
+    """Return ``True`` if the ``metis-archive`` container image is built."""
+    if not podman_available():
+        return False
+    result = subprocess.run(
+        ["podman", "image", "exists", ARCHIVE_IMAGE],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def archive_pod_running() -> bool:
+    """Return ``True`` if the ``metis-archive`` pod is running."""
+    if not podman_available():
+        return False
+    result = subprocess.run(
+        ["podman", "pod", "inspect", POD_NAME, "--format", "{{.State}}"],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "Running"
+
+
+def db_initialized() -> bool:
+    """Return ``True`` if the local archive database has been initialised.
+
+    Checks for the ``aweprojects`` table created by ``dbtestsetup``.
+    """
+    if not podman_available():
+        return False
+    result = subprocess.run(
+        ["podman", "exec", DB_CONTAINER,
+         "psql", "-U", "system", "-d", "wise",
+         "-c", "SELECT 1 FROM aweprojects LIMIT 1"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _stream_process(
+    cmd: list[str],
+    on_log: Callable[[str], None] | None,
+    **kwargs: object,
+) -> None:
+    """Run *cmd* and stream stdout/stderr lines to *on_log*.
+
+    Raises ``RuntimeError`` on non-zero exit.
+    """
+    if on_log:
+        on_log(f"$ {' '.join(str(c) for c in cmd)}")
+    proc = subprocess.Popen(
+        [str(c) for c in cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        **kwargs,
+    )
+    for line in proc.stdout:
+        if on_log:
+            on_log(line.rstrip("\n"))
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Command exited {proc.returncode}: {' '.join(str(c) for c in cmd)}"
+        )
+
+
+def build_archive_image(
+    credentials: str,
+    on_log: Callable[[str], None] | None = None,
+) -> None:
+    """Build the ``metis-archive`` container image from the Containerfile.
+
+    *credentials* is ``"user:pass"`` for the OmegaCEN package channels.
+    The credentials are passed as a Podman build secret and never baked
+    into the image itself.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False
+    ) as tmp:
+        tmp.write(credentials)
+        tmp_path = tmp.name
+
+    try:
+        _stream_process(
+            [
+                "podman", "build",
+                "--secret", f"id=OMEGACEN_CREDENTIALS,src={tmp_path}",
+                "-t", ARCHIVE_IMAGE,
+                "-f", str(CONTAINERFILE),
+                str(CONTAINER_CONTEXT),
+            ],
+            on_log,
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
+def start_archive_pod(
+    on_log: Callable[[str], None] | None = None,
+) -> None:
+    """Create and start the local archive pod (postgres + dataserver).
+
+    If the pod already exists but is stopped the existing containers are
+    started.  On first run the database schema is initialised automatically.
+    """
+    # If the pod already exists, try to just start it.
+    probe = subprocess.run(
+        ["podman", "pod", "exists", POD_NAME], capture_output=True,
+    )
+    if probe.returncode == 0:
+        if on_log:
+            on_log("Pod already exists — starting…")
+        _stream_process(["podman", "pod", "start", POD_NAME], on_log)
+        _wait_for_postgres(on_log)
+        return
+
+    # Create a new pod with port mappings.
+    if on_log:
+        on_log("Creating pod…")
+    _stream_process(
+        [
+            "podman", "pod", "create",
+            "--name", POD_NAME,
+            "--hostname", "localhost",
+            "-p", "127.0.0.1:5432:5432",
+            "-p", "127.0.0.1:8013:8013",
+        ],
+        on_log,
+    )
+
+    # Start PostgreSQL.
+    if on_log:
+        on_log("Starting PostgreSQL…")
+    _stream_process(
+        [
+            "podman", "run", "-d",
+            "--pod", POD_NAME,
+            "--name", DB_CONTAINER,
+            "-e", "POSTGRES_DB=wise",
+            "-e", "POSTGRES_USER=system",
+            "-e", "POSTGRES_PASSWORD=klmn",
+            "-v", f"{DB_VOLUME}:/var/lib/postgresql/data",
+            "docker.io/library/postgres:17",
+        ],
+        on_log,
+    )
+
+    _wait_for_postgres(on_log)
+
+    # Start the dataserver.
+    if on_log:
+        on_log("Starting dataserver…")
+    _stream_process(
+        [
+            "podman", "run", "-d",
+            "--pod", POD_NAME,
+            "--name", DS_CONTAINER,
+            "-v", f"{DS_VOLUME}:/root/space",
+            f"{ARCHIVE_IMAGE}:latest",
+            "/root/scripts/entrypoint_dataserver.sh",
+        ],
+        on_log,
+    )
+
+    # Allow the dataserver a moment to generate its TLS cert and bind.
+    time.sleep(2)
+
+    # Initialise the database schema (idempotent — the script checks first).
+    # DB_PASSWORD is passed at runtime so it is not baked into the image.
+    if on_log:
+        on_log("Running database setup…")
+    _stream_process(
+        ["podman", "exec",
+         "-e", "DB_PASSWORD=klmn",
+         DS_CONTAINER, "/root/scripts/dbsetup.sh"],
+        on_log,
+    )
+
+
+def _wait_for_postgres(
+    on_log: Callable[[str], None] | None = None,
+    timeout: int = 60,
+) -> None:
+    """Block until PostgreSQL inside the pod is ready to accept connections."""
+    if on_log:
+        on_log("Waiting for PostgreSQL to be ready…")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["podman", "exec", DB_CONTAINER,
+             "pg_isready", "-U", "system", "-d", "wise"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            if on_log:
+                on_log("PostgreSQL is ready.")
+            return
+        time.sleep(1)
+    raise RuntimeError("PostgreSQL did not become ready within timeout.")
+
+
+def stop_archive_pod(
+    on_log: Callable[[str], None] | None = None,
+) -> None:
+    """Stop and remove the local archive pod.
+
+    Named volumes (database data, dataserver space) are preserved so that
+    the next ``start_archive_pod`` call resumes where it left off.
+    """
+    probe = subprocess.run(
+        ["podman", "pod", "exists", POD_NAME], capture_output=True,
+    )
+    if probe.returncode != 0:
+        if on_log:
+            on_log("Pod does not exist — nothing to stop.")
+        return
+
+    if on_log:
+        on_log("Stopping pod…")
+    _stream_process(["podman", "pod", "stop", POD_NAME], on_log)
+    if on_log:
+        on_log("Removing pod (volumes are preserved)…")
+    _stream_process(["podman", "pod", "rm", POD_NAME], on_log)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +515,8 @@ def upload_files(
 
     Returns the list of successfully ingested filenames.
     """
-    _ensure_awetarget()
+    _ensure_db_connection()
+    _ensure_metiswise_imports()
 
     try:
         from astropy.io import fits
@@ -173,10 +586,10 @@ def query_archive(
     processed products alike.  Returns a list of dicts with ``filename``,
     ``pro_catg``, and ``class_name`` keys.
     """
-    _ensure_awetarget()
+    _ensure_db_connection()
+    _ensure_metiswise_imports()
 
     try:
-        import metiswise.main.aweimports  # noqa: F401 — registers DataItem subclasses
         from metiswise.main.dataitem import DataItem
     except ImportError as exc:
         raise RuntimeError(
@@ -221,7 +634,7 @@ def download_file(
 
     Returns the path to the downloaded file, or ``None`` on failure.
     """
-    _ensure_awetarget()
+    _ensure_db_connection()
 
     try:
         from metiswise.main.dataitem import DataItem
