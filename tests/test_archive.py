@@ -32,6 +32,14 @@ _DB_MOCKS = {
     "common.database.Database": MagicMock(),
 }
 
+# Mocks for the modules imported by _ensure_metiswise_imports().
+_IMPORT_MOCKS = {
+    "codes": MagicMock(),
+    "codes.drld_parser": MagicMock(),
+    "codes.drld_parser.data_reduction_library_design": MagicMock(),
+    "metiswise.main.aweimports": MagicMock(),
+}
+
 
 # ---------------------------------------------------------------------------
 # MetisWISE availability
@@ -410,6 +418,7 @@ class TestUploadFiles:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "astropy": MagicMock(),
             "astropy.io": mock_astropy_io,
             "astropy.io.fits": mock_fits,
@@ -441,6 +450,7 @@ class TestUploadFiles:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "astropy": MagicMock(),
             "astropy.io": MagicMock(),
             "astropy.io.fits": mock_fits,
@@ -477,9 +487,9 @@ class TestQueryArchive:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
-            "metiswise.main.aweimports": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=mock_dataitem),
             "metiswise.main.pro": MagicMock(),
         }):
@@ -507,9 +517,9 @@ class TestQueryArchive:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
-            "metiswise.main.aweimports": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
         }):
             import importlib
@@ -537,9 +547,9 @@ class TestQueryArchive:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
-            "metiswise.main.aweimports": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
         }):
             import importlib
@@ -558,9 +568,9 @@ class TestQueryArchive:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
-            "metiswise.main.aweimports": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
         }):
             import importlib
@@ -593,9 +603,9 @@ class TestQueryArchive:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
-            "metiswise.main.aweimports": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=_DataItem),
         }):
             import importlib
@@ -632,6 +642,7 @@ class TestDownloadFile:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=mock_dataitem),
@@ -655,6 +666,7 @@ class TestDownloadFile:
 
         with patch.dict("sys.modules", {
             **_DB_MOCKS,
+            **_IMPORT_MOCKS,
             "metiswise": MagicMock(),
             "metiswise.main": MagicMock(),
             "metiswise.main.dataitem": MagicMock(DataItem=mock_dataitem),
