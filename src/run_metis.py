@@ -772,16 +772,9 @@ def parse_args(argv=None):
     p.add_argument(
         "--auto-fetch-calibrations", action="store_true",
         help="Automatically download missing master calibration files from "
-             "the archive data server before running the pipeline. "
-             "Requires the archive stack to be running (see Archive tab).",
-    )
-    p.add_argument(
-        "--archive-host", default="localhost",
-        help="Archive data server hostname [default: localhost]",
-    )
-    p.add_argument(
-        "--archive-port", type=int, default=8013,
-        help="Archive data server port [default: 8013]",
+             "the remote METIS archive before running the pipeline. "
+             "Requires MetisWISE to be installed and ~/.awe/Environment.cfg "
+             "to hold valid credentials (see Archive tab).",
     )
     p.add_argument(
         "--prefer-masters", action="store_true",

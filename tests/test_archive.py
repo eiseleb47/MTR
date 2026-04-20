@@ -4,17 +4,12 @@ Unit tests for archive.py.
 Covers:
   - MetisWISE availability check
   - Install command generation
-  - Stale Environment.cfg detection
-  - Podman availability & install command detection
-  - Container image / pod management helpers
-  - Database credential writing (remote & local modes)
-  - Upload / query / download with mocked MetisWISE
+  - Database connection setup
+  - Environment.cfg read/write helpers
+  - Query / download with mocked MetisWISE
   - Missing calibration identification
 """
 
-import shutil
-import subprocess
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -22,8 +17,6 @@ import pytest
 import archive
 
 # Mocks for the commonwise database modules imported by _ensure_db_connection().
-# Merge into every patch.dict("sys.modules", …) block that exercises upload,
-# query, or download functions.
 _DB_MOCKS = {
     "common": MagicMock(),
     "common.config": MagicMock(),
@@ -103,46 +96,6 @@ class TestInstallMetisWiseCommand:
 
 
 # ---------------------------------------------------------------------------
-# Stale Environment.cfg detection
-# ---------------------------------------------------------------------------
-
-
-class TestCheckStaleEnvironmentCfg:
-    def test_no_file(self, tmp_path):
-        with patch("archive.Path.home", return_value=tmp_path):
-            assert archive.check_stale_environment_cfg() is None
-
-    def test_production_config_no_warning(self, tmp_path):
-        awe = tmp_path / ".awe"
-        awe.mkdir()
-        (awe / "Environment.cfg").write_text(
-            "data_server : metis-ds.hpc.rug.nl\n"
-        )
-        with patch("archive.Path.home", return_value=tmp_path):
-            assert archive.check_stale_environment_cfg() is None
-
-    def test_stale_container_config_warns(self, tmp_path):
-        awe = tmp_path / ".awe"
-        awe.mkdir()
-        (awe / "Environment.cfg").write_text(
-            "data_server : dataserver\ndata_port : 8013\n"
-        )
-        with patch("archive.Path.home", return_value=tmp_path):
-            warning = archive.check_stale_environment_cfg()
-            assert warning is not None
-            assert "dataserver" in warning
-
-    def test_localhost_not_stale(self, tmp_path):
-        awe = tmp_path / ".awe"
-        awe.mkdir()
-        (awe / "Environment.cfg").write_text(
-            "data_server : localhost\ndata_port : 8013\n"
-        )
-        with patch("archive.Path.home", return_value=tmp_path):
-            assert archive.check_stale_environment_cfg() is None
-
-
-# ---------------------------------------------------------------------------
 # Database connection setup
 # ---------------------------------------------------------------------------
 
@@ -184,22 +137,28 @@ class TestEnsureDbConnection:
 
             archive._ensure_db_connection()
             archive._ensure_db_connection()
-            # Only called once despite two invocations
             mock_profiles.create_profile.assert_called_once()
             mock_database.connect.assert_called_once()
 
             importlib.reload(archive)
 
     def test_noop_when_commonwise_missing(self):
-        # No common.* modules mocked — ImportError path fires
-        import importlib
-        importlib.reload(archive)
+        # Force ImportError on any `import common...` even though the package
+        # may happen to be installed in the test environment.
+        with patch.dict("sys.modules", {
+            "common": None,
+            "common.config": None,
+            "common.config.Profile": None,
+            "common.database": None,
+            "common.database.Database": None,
+        }):
+            import importlib
+            importlib.reload(archive)
 
-        # Should not raise; just sets db_ready and returns
-        archive._ensure_db_connection()
-        assert archive._thread_local.db_ready is True
+            archive._ensure_db_connection()
+            assert archive._thread_local.db_ready is True
 
-        importlib.reload(archive)
+            importlib.reload(archive)
 
 
 class TestResetDbConnection:
@@ -209,265 +168,162 @@ class TestResetDbConnection:
         assert not getattr(archive._thread_local, "db_ready", False)
 
 
-class TestWriteDbCredentials:
-    def test_writes_config(self, tmp_path):
+# ---------------------------------------------------------------------------
+# Environment.cfg read/write helpers
+# ---------------------------------------------------------------------------
+
+_FIVE = {
+    "database_user":            "AWTEST",
+    "database_password":        "lmno",
+    "project":                  "SIM",
+    "database_tablespacename":  "metis_data",
+    "database_name":            "metis.example.com:5436/pgmetis",
+}
+
+
+class TestWriteEnvCfg:
+    def test_creates_new_file(self, tmp_path):
         with patch("archive.Path.home", return_value=tmp_path):
-            cfg = archive.write_db_credentials("AWAITTEST", "secret")
+            cfg = archive.write_env_cfg(**_FIVE)
         assert cfg.exists()
         text = cfg.read_text()
-        assert text.startswith("[global]\n")
-        assert "database_user : AWAITTEST" in text
-        assert "database_password : secret" in text
+        assert text.startswith("[global]")
+        for key, value in _FIVE.items():
+            assert f"{key} : {value}" in text
 
     def test_creates_awe_dir(self, tmp_path):
         with patch("archive.Path.home", return_value=tmp_path):
-            archive.write_db_credentials("user", "pass")
+            archive.write_env_cfg(**_FIVE)
         assert (tmp_path / ".awe").is_dir()
 
-    def test_remote_mode_minimal(self, tmp_path):
-        """Without host=, only username and password are written."""
+    def test_only_five_keys_when_creating(self, tmp_path):
+        """Nothing else is written — data_server, port, protocol, etc.
+        inherit from the MetisWISE default."""
         with patch("archive.Path.home", return_value=tmp_path):
-            cfg = archive.write_db_credentials("USER", "PW")
+            cfg = archive.write_env_cfg(**_FIVE)
         text = cfg.read_text()
-        assert "database_name" not in text
         assert "data_server" not in text
+        assert "data_port" not in text
+        assert "data_protocol" not in text
+        assert "database_engine" not in text
 
-    def test_local_mode_full_config(self, tmp_path):
-        """With host='localhost', a complete Environment.cfg is written."""
+    def test_patches_existing_global_section(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        cfg = awe / "Environment.cfg"
+        cfg.write_text(
+            "# a comment\n"
+            "[global]\n"
+            "database_user : OLDUSER\n"
+            "database_password : OLDPASS\n"
+            "project : OLDPROJ\n"
+            "database_tablespacename : oldspace\n"
+            "database_name : old.example.com/db\n"
+            "data_server : remote.example.com\n"
+            "data_port : 8013\n"
+        )
         with patch("archive.Path.home", return_value=tmp_path):
-            cfg = archive.write_db_credentials(
-                "AWTEST", "lmno", host="localhost",
-            )
+            archive.write_env_cfg(**_FIVE)
         text = cfg.read_text()
-        assert "database_name : localhost/wise" in text
-        assert "database_engine : postgresql" in text
-        assert "database_user : AWTEST" in text
-        assert "database_password : lmno" in text
-        assert "data_server : localhost" in text
+        # Updated values present
+        for key, value in _FIVE.items():
+            assert f"{key} : {value}" in text
+        # Unrelated keys preserved
+        assert "data_server : remote.example.com" in text
         assert "data_port : 8013" in text
-        assert "data_protocol : https" in text
-        assert "project : SIM" in text
+        # Comment preserved
+        assert "# a comment" in text
+        # Old values gone
+        assert "OLDUSER" not in text
+        assert "old.example.com" not in text
 
-    def test_local_mode_custom_data_server(self, tmp_path):
+    def test_appends_missing_keys_to_existing_global(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        cfg = awe / "Environment.cfg"
+        cfg.write_text(
+            "[global]\n"
+            "database_user : A\n"
+            "data_server : remote.example.com\n"
+        )
         with patch("archive.Path.home", return_value=tmp_path):
-            cfg = archive.write_db_credentials(
-                "U", "P", host="myhost",
-                data_server="ds.example.com", data_port=9999,
-            )
+            archive.write_env_cfg(**_FIVE)
         text = cfg.read_text()
-        assert "database_name : myhost/wise" in text
-        assert "data_server : ds.example.com" in text
-        assert "data_port : 9999" in text
+        for key, value in _FIVE.items():
+            assert f"{key} : {value}" in text
+        assert "data_server : remote.example.com" in text
 
+    def test_creates_global_when_absent(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        cfg = awe / "Environment.cfg"
+        cfg.write_text("[other]\nkey : value\n")
+        with patch("archive.Path.home", return_value=tmp_path):
+            archive.write_env_cfg(**_FIVE)
+        text = cfg.read_text()
+        assert "[other]" in text
+        assert "[global]" in text
+        for key, value in _FIVE.items():
+            assert f"{key} : {value}" in text
 
-# ---------------------------------------------------------------------------
-# Podman availability & install command
-# ---------------------------------------------------------------------------
-
-
-class TestPodmanAvailable:
-    def test_available(self):
-        with patch("archive.shutil.which", return_value="/usr/bin/podman"):
-            assert archive.podman_available() is True
-
-    def test_not_available(self):
-        with patch("archive.shutil.which", return_value=None):
-            assert archive.podman_available() is False
-
-
-class TestDetectPodmanInstallCmd:
-    def _mock_os_release(self, tmp_path, distro_id, id_like=""):
-        content = f'ID={distro_id}\n'
-        if id_like:
-            content += f'ID_LIKE="{id_like}"\n'
-        (tmp_path / "os-release").write_text(content)
-        return tmp_path / "os-release"
-
-    def _run_with_os_release(self, tmp_path, content):
-        """Write a fake /etc/os-release and run detect_podman_install_cmd."""
-        os_release = tmp_path / "os-release"
-        os_release.write_text(content)
-        with patch("archive.Path", return_value=os_release):
-            return archive.detect_podman_install_cmd()
-
-    def test_debian(self, tmp_path):
-        cmd = self._run_with_os_release(tmp_path, 'ID=debian\n')
-        assert cmd == ["pkexec", "apt-get", "install", "-y", "podman"]
-
-    def test_ubuntu(self, tmp_path):
-        cmd = self._run_with_os_release(tmp_path, 'ID=ubuntu\nID_LIKE="debian"\n')
-        assert "apt-get" in cmd
-
-    def test_kali(self, tmp_path):
-        cmd = self._run_with_os_release(tmp_path, 'ID=kali\nID_LIKE="debian"\n')
-        assert "apt-get" in cmd
-
-    def test_fedora(self, tmp_path):
-        cmd = self._run_with_os_release(tmp_path, 'ID=fedora\n')
-        assert "dnf" in cmd
-
-    def test_arch(self, tmp_path):
-        cmd = self._run_with_os_release(tmp_path, 'ID=arch\n')
-        assert "pacman" in cmd
-
-    def test_unknown_raises(self, tmp_path):
-        os_release = tmp_path / "os-release"
-        os_release.write_text('ID=obscure\n')
-        with patch("archive.Path", return_value=os_release):
-            with pytest.raises(RuntimeError, match="Cannot determine"):
-                archive.detect_podman_install_cmd()
-
-
-# ---------------------------------------------------------------------------
-# Container image & pod status helpers
-# ---------------------------------------------------------------------------
-
-
-class TestArchiveImageExists:
-    def test_exists(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            assert archive.archive_image_exists() is True
-            mock_run.assert_called_once()
-            cmd = mock_run.call_args[0][0]
-            assert cmd[:3] == ["podman", "image", "exists"]
-
-    def test_not_exists(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1)
-            assert archive.archive_image_exists() is False
-
-    def test_no_podman(self):
-        with patch("archive.podman_available", return_value=False):
-            assert archive.archive_image_exists() is False
-
-
-class TestArchivePodRunning:
-    def test_running(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="Running\n",
-            )
-            assert archive.archive_pod_running() is True
-
-    def test_stopped(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="Exited\n",
-            )
-            assert archive.archive_pod_running() is False
-
-    def test_no_pod(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=125)
-            assert archive.archive_pod_running() is False
-
-    def test_no_podman(self):
-        with patch("archive.podman_available", return_value=False):
-            assert archive.archive_pod_running() is False
-
-
-class TestDbInitialized:
-    def test_initialized(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            assert archive.db_initialized() is True
-
-    def test_not_initialized(self):
-        with patch("archive.podman_available", return_value=True), \
-             patch("archive.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=2)
-            assert archive.db_initialized() is False
-
-    def test_no_podman(self):
-        with patch("archive.podman_available", return_value=False):
-            assert archive.db_initialized() is False
-
-
-# ---------------------------------------------------------------------------
-# Upload files (mocked MetisWISE)
-# ---------------------------------------------------------------------------
-
-
-class TestUploadFiles:
-    def test_upload_raw_file(self, tmp_path):
-        fits_file = tmp_path / "raw.fits"
-        fits_file.write_bytes(b"dummy")
-
-        mock_fits = MagicMock()
-        mock_hdus = MagicMock()
-        mock_hdus.__getitem__ = MagicMock(
-            return_value=MagicMock(header={"ESO DPR CATG": "FLAT"})
+    def test_handles_equals_separator(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        cfg = awe / "Environment.cfg"
+        cfg.write_text(
+            "[global]\n"
+            "database_user = OLDUSER\n"
         )
-        mock_fits.open.return_value = mock_hdus
+        with patch("archive.Path.home", return_value=tmp_path):
+            archive.write_env_cfg(**_FIVE)
+        text = cfg.read_text()
+        assert "database_user = AWTEST" in text
 
-        mock_raw_cls = MagicMock()
-        mock_raw_inst = MagicMock()
-        mock_raw_cls.return_value = mock_raw_inst
 
-        mock_astropy_io = MagicMock(fits=mock_fits)
-        mock_mw_main = MagicMock()
-        mock_mw_main.raw = MagicMock(Raw=mock_raw_cls)
-        mock_mw_main.pro = MagicMock()
+class TestReadEnvCfg:
+    def test_missing_file(self, tmp_path):
+        with patch("archive.Path.home", return_value=tmp_path):
+            values = archive.read_env_cfg()
+        assert values == {k: "" for k in archive.ENV_CFG_FIELDS}
 
-        with patch.dict("sys.modules", {
-            **_DB_MOCKS,
-            **_IMPORT_MOCKS,
-            "astropy": MagicMock(),
-            "astropy.io": mock_astropy_io,
-            "astropy.io.fits": mock_fits,
-            "metiswise": MagicMock(),
-            "metiswise.main": mock_mw_main,
-            "metiswise.main.raw": MagicMock(Raw=mock_raw_cls),
-            "metiswise.main.pro": MagicMock(),
-        }):
-            import importlib
-            importlib.reload(archive)
-
-            result = archive.upload_files([fits_file])
-            assert result == ["raw.fits"]
-            mock_raw_inst.store.assert_called_once()
-            mock_raw_inst.commit.assert_called_once()
-
-            importlib.reload(archive)
-
-    def test_upload_skips_unknown_header(self, tmp_path):
-        fits_file = tmp_path / "unknown.fits"
-        fits_file.write_bytes(b"dummy")
-
-        mock_fits = MagicMock()
-        mock_hdus = MagicMock()
-        mock_hdus.__getitem__ = MagicMock(
-            return_value=MagicMock(header={})
+    def test_populated_file(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        (awe / "Environment.cfg").write_text(
+            "[global]\n"
+            "database_user : AWTEST\n"
+            "database_password : lmno\n"
+            "project : SIM\n"
+            "database_tablespacename : ts\n"
+            "database_name : metis.example.com:5436/pgmetis\n"
+            "data_server : remote.example.com\n"
         )
-        mock_fits.open.return_value = mock_hdus
+        with patch("archive.Path.home", return_value=tmp_path):
+            values = archive.read_env_cfg()
+        assert values["database_user"] == "AWTEST"
+        assert values["database_password"] == "lmno"
+        assert values["project"] == "SIM"
+        assert values["database_tablespacename"] == "ts"
+        assert values["database_name"] == "metis.example.com:5436/pgmetis"
 
-        with patch.dict("sys.modules", {
-            **_DB_MOCKS,
-            **_IMPORT_MOCKS,
-            "astropy": MagicMock(),
-            "astropy.io": MagicMock(),
-            "astropy.io.fits": mock_fits,
-            "metiswise": MagicMock(),
-            "metiswise.main": MagicMock(),
-            "metiswise.main.raw": MagicMock(),
-            "metiswise.main.pro": MagicMock(),
-        }):
-            import importlib
-            importlib.reload(archive)
+    def test_ignores_other_sections(self, tmp_path):
+        awe = tmp_path / ".awe"
+        awe.mkdir()
+        (awe / "Environment.cfg").write_text(
+            "[other]\n"
+            "database_user : LEAKED\n"
+            "[global]\n"
+            "database_user : CORRECT\n"
+        )
+        with patch("archive.Path.home", return_value=tmp_path):
+            values = archive.read_env_cfg()
+        assert values["database_user"] == "CORRECT"
 
-            logs = []
-            result = archive.upload_files([fits_file], on_log=logs.append)
-            assert result == []
-            assert any("Skipping" in msg for msg in logs)
-
-            importlib.reload(archive)
+    def test_round_trip(self, tmp_path):
+        with patch("archive.Path.home", return_value=tmp_path):
+            archive.write_env_cfg(**_FIVE)
+            values = archive.read_env_cfg()
+        assert values == _FIVE
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +481,6 @@ class TestQueryArchive:
 
 class TestDownloadFile:
     def test_download_success(self, tmp_path):
-        # Create a fake source file that MetisWISE would "retrieve"
         src_dir = tmp_path / "retrieve_dir"
         src_dir.mkdir()
         (src_dir / "data.fits").write_bytes(b"fits data")
@@ -689,7 +544,6 @@ class TestIdentifyMissingCalibrations:
     """Test the pure-logic calibration gap detection."""
 
     def test_no_gaps_when_all_present(self):
-        # IFU workflow: provide all raw tags
         all_tags = {
             "DETLIN_IFU_RAW", "DARK_IFU_RAW", "IFU_DISTORTION_RAW",
             "IFU_WAVE_RAW", "IFU_RSRF_RAW", "IFU_STD_RAW",
@@ -700,8 +554,6 @@ class TestIdentifyMissingCalibrations:
         assert missing == []
 
     def test_detects_upstream_gap(self):
-        # Only have the rsrf raw — lingain, dark, distortion, wavecal
-        # are upstream and missing.
         missing = archive.identify_missing_calibrations(
             "metis.metis_ifu_wkf",
             data_tags={"IFU_RSRF_RAW"},
@@ -712,11 +564,9 @@ class TestIdentifyMissingCalibrations:
         assert "metis_ifu_dark" in task_names
         assert "metis_ifu_distortion" in task_names
         assert "metis_ifu_wavecal" in task_names
-        # rsrf itself is present, so it should NOT be listed
         assert "metis_ifu_rsrf" not in task_names
 
     def test_lm_img_partial(self):
-        # Only have flat raw — lingain and dark are missing
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={"LM_FLAT_LAMP_RAW"},
@@ -740,23 +590,19 @@ class TestIdentifyMissingCalibrations:
         assert missing == []
 
     def test_science_tasks_ignored(self):
-        # Science tasks should not contribute to the missing list
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={"LM_DISTORTION_RAW", "LM_IMAGE_SCI_RAW"},
             has_science=True,
         )
         task_names = [t for t, _ in missing]
-        # lingain, dark, flat are upstream of distortion
         assert "metis_lm_img_lingain" in task_names
         assert "metis_lm_img_dark" in task_names
         assert "metis_lm_img_flat" in task_names
-        # Science tasks should not appear
         assert "metis_lm_img_basic_reduce_sci" not in task_names
         assert "metis_lm_img_basic_reduce_std" not in task_names
 
     def test_master_pro_catg_covers_task(self):
-        # User has flat raw + master dark + master linearity: nothing to fetch
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={"LM_FLAT_LAMP_RAW", "MASTER_DARK_2RG", "LINEARITY_2RG"},
@@ -765,8 +611,6 @@ class TestIdentifyMissingCalibrations:
         assert missing == []
 
     def test_master_fills_partial_gap(self):
-        # Flat raw + master dark, but no linearity master or raw — only
-        # lingain should still be listed as missing.
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={"LM_FLAT_LAMP_RAW", "MASTER_DARK_2RG"},
@@ -777,8 +621,6 @@ class TestIdentifyMissingCalibrations:
         assert missing == [("metis_lm_img_lingain", "LINEARITY_2RG")]
 
     def test_only_masters_no_raw(self):
-        # All-masters coverage up through flat: flat is the deepest covered
-        # task (via its PRO.CATG), and dark + lingain are also covered.
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={
@@ -791,8 +633,6 @@ class TestIdentifyMissingCalibrations:
         assert missing == []
 
     def test_raw_and_master_same_task(self):
-        # Providing both the raw and the master for dark must not confuse
-        # the gap walk — lingain is still missing.
         missing = archive.identify_missing_calibrations(
             "metis.metis_lm_img_wkf",
             data_tags={"DARK_2RG_RAW", "MASTER_DARK_2RG"},

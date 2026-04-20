@@ -444,11 +444,15 @@ class InstallWorker(QThread):
             self._step(f"Cloning / updating METIS_Simulations  →  {TARGET_B}")
             self._clone_or_update(REPO_B_URL, TARGET_B)
 
-            self._step("Installing Python dependencies (uv sync --group pipeline)…")
+            self._step("Installing Python dependencies (uv sync --group pipeline --inexact)…")
             recipe_dir = str(TARGET_A / "metisp" / "pyrecipes") + "/"
             os.environ["PYCPL_RECIPE_DIR"] = recipe_dir
             os.environ["PYESOREX_PLUGIN_DIR"] = recipe_dir
-            self._run(["uv", "sync", "--group", "pipeline"], cwd=REPO_ROOT)
+            # --inexact preserves packages installed via `uv pip install` that
+            # aren't tracked in pyproject.toml (e.g. MetisWISE from the
+            # Archive tab).  Without it, uv sync wipes them on every run.
+            self._run(["uv", "sync", "--group", "pipeline", "--inexact"],
+                      cwd=REPO_ROOT)
 
             self._step("Writing .env…")
             self._write_env()
@@ -701,133 +705,32 @@ class MetisWISEInstallWorker(QThread):
             self.done.emit(False)
 
 
-class PodmanInstallWorker(QThread):
-    """Install Podman via the system package manager."""
+class TestConnectionWorker(QThread):
+    """Write the five Environment.cfg fields and probe the remote archive."""
 
     log  = pyqtSignal(str, str)
     done = pyqtSignal(bool)
 
-    def run(self) -> None:
-        from archive import detect_podman_install_cmd
-        try:
-            cmd = detect_podman_install_cmd()
-            self.log.emit(f"$ {' '.join(cmd)}\n", "cyan")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in iter(proc.stdout.readline, ""):
-                self.log.emit(line, "")
-            proc.wait()
-            if proc.returncode != 0:
-                self.log.emit(
-                    f"\n✗ Podman install failed (exit code {proc.returncode}).\n",
-                    "red",
-                )
-                self.done.emit(False)
-                return
-            self.log.emit("\n✓ Podman installed successfully.\n", "green")
-            self.done.emit(True)
-        except Exception as exc:
-            self.log.emit(f"\n✗ Failed: {exc}\n", "red")
-            self.done.emit(False)
-
-
-class BuildStartDBWorker(QThread):
-    """Build the archive container image (if needed) and start the pod."""
-
-    log  = pyqtSignal(str, str)
-    done = pyqtSignal(bool)
-
-    def __init__(self, credentials: str) -> None:
+    def __init__(self, fields: dict[str, str]) -> None:
         super().__init__()
-        self._credentials = credentials
+        self._fields = fields
 
     def run(self) -> None:
-        from archive import (
-            archive_image_exists, build_archive_image,
-            archive_pod_running, start_archive_pod,
-        )
+        from archive import write_env_cfg, reset_db_connection, query_archive
         try:
-            if not archive_image_exists():
-                self.log.emit("── Building archive container image…\n", "cyan")
-                build_archive_image(
-                    self._credentials,
-                    on_log=lambda msg: self.log.emit(msg + "\n", ""),
-                )
-                self.log.emit("\n✓ Image built.\n", "green")
-            else:
-                self.log.emit("Archive image already exists — skipping build.\n", "green")
-
-            if archive_pod_running():
-                self.log.emit("Pod is already running.\n", "green")
-                self.done.emit(True)
-                return
-
-            self.log.emit("\n── Starting local archive pod…\n", "cyan")
-            start_archive_pod(
+            cfg = write_env_cfg(**self._fields)
+            self.log.emit(f"Wrote credentials to {cfg}\n", "green")
+            reset_db_connection()
+            self.log.emit("Probing archive connection…\n", "cyan")
+            items = query_archive(
                 on_log=lambda msg: self.log.emit(msg + "\n", ""),
             )
-            self.log.emit("\n✓ Local archive is running.\n", "green")
-            self.done.emit(True)
-        except Exception as exc:
-            self.log.emit(f"\n✗ Failed: {exc}\n", "red")
-            self.done.emit(False)
-
-
-class StopDBWorker(QThread):
-    """Stop and remove the local archive pod."""
-
-    log  = pyqtSignal(str, str)
-    done = pyqtSignal(bool)
-
-    def run(self) -> None:
-        from archive import stop_archive_pod
-        try:
-            stop_archive_pod(
-                on_log=lambda msg: self.log.emit(msg + "\n", ""),
-            )
-            self.log.emit("\n✓ Pod stopped.\n", "green")
-            self.done.emit(True)
-        except Exception as exc:
-            self.log.emit(f"\n✗ Failed: {exc}\n", "red")
-            self.done.emit(False)
-
-
-class UploadWorker(QThread):
-    """Upload FITS files to the archive."""
-
-    log      = pyqtSignal(str, str)
-    progress = pyqtSignal(int, int)
-    done     = pyqtSignal(bool)
-
-    def __init__(self, files: list[Path]) -> None:
-        super().__init__()
-        self._files = files
-
-    def run(self) -> None:
-        from archive import upload_files
-        try:
-            total = len(self._files)
-            count = [0]
-
-            def on_log(msg: str) -> None:
-                self.log.emit(msg + "\n", "")
-                if msg.startswith("["):
-                    try:
-                        idx = int(msg.split("/")[0].strip("["))
-                        self.progress.emit(idx, total)
-                    except (ValueError, IndexError):
-                        pass
-                    count[0] += 1
-
-            ingested = upload_files(self._files, on_log=on_log)
             self.log.emit(
-                f"\n✓ Uploaded {len(ingested)}/{total} file(s).\n", "green",
+                f"\n✓ Connected — {len(items)} item(s) visible.\n", "green",
             )
             self.done.emit(True)
         except Exception as exc:
-            self.log.emit(f"\n✗ Upload failed: {exc}\n", "red")
+            self.log.emit(f"\n✗ Connection failed: {exc}\n", "red")
             self.done.emit(False)
 
 
@@ -896,20 +799,39 @@ class DownloadWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class ArchiveTab(QWidget):
-    """Third tab: local archive setup and FITS upload/download.
+    """Archive tab: install MetisWISE + configure remote archive, then
+    query / download master calibrations.
 
-    Page 0 — Setup: install MetisWISE, install Podman, build & start
-    the local database pod.
-    Page 1 — Operations: connect to the local database, upload/download.
+    Page 0 — Install & Configure: pip-install MetisWISE into the project
+    venv, fill the five ``[global]`` fields written to
+    ``~/.awe/Environment.cfg``, and run a test connection.
+    Page 1 — Query & Download: search the remote archive by category /
+    filename and retrieve files.
     """
+
+    _CFG_FIELD_ORDER = (
+        "database_user",
+        "database_password",
+        "project",
+        "database_tablespacename",
+        "database_name",
+    )
 
     def __init__(self) -> None:
         super().__init__()
         self._settings = QSettings("METIS", "TestRunner")
         self._worker: QThread | None = None
+        self._connection_ok = False
         self._build_ui()
         self._load_settings()
-        self._check_state()
+        self._refresh_install_status()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        # Re-check whether MetisWISE is still installed every time the tab
+        # becomes visible — the Install tab's `uv sync` can remove it, and
+        # the user needs the Install button to re-enable in that case.
+        super().showEvent(event)
+        self._refresh_install_status()
 
     # ── UI construction ─────────────────────────────────────────────────────
 
@@ -919,44 +841,50 @@ class ArchiveTab(QWidget):
         outer.setContentsMargins(20, 20, 20, 20)
 
         self._stack = QStackedWidget()
-        outer.addWidget(self._stack)
+        outer.addWidget(self._stack, stretch=1)
 
-        # ── Page 0: Setup prerequisites ────────────────────────────────────
-        page0 = QWidget()
-        lay0 = QVBoxLayout(page0)
-        lay0.setSpacing(12)
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setFont(QFont("Monospace", 9))
+        self._log.setMinimumHeight(140)
+        outer.addWidget(self._log, stretch=1)
 
-        desc0 = QLabel(
-            "<b>Archive Setup</b><br><br>"
-            "The local archive uses a <b>PostgreSQL</b> database and "
-            "<b>dataserver</b> running in a Podman pod.  Complete the "
-            "three steps below to get started.<br><br>"
-            "<b>Note:</b> Please run the <b>Install</b> tab first to set "
-            "up the project environment."
+        self._stack.addWidget(self._build_page_install())
+        self._stack.addWidget(self._build_page_query())
+
+    def _build_page_install(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(12)
+
+        desc = QLabel(
+            "<b>Install MetisWISE & connect to the remote archive</b><br><br>"
+            "The Archive tab talks to the METIS AIT archive via the "
+            "<a href='https://github.com/AstarVienna/MetisWISE'>MetisWISE</a> "
+            "Python client. Paste the OmegaCEN credentials from the "
+            "<a href='https://metis.strw.leidenuniv.nl/wiki/doku.php?id=ait:archive'>"
+            "METIS wiki</a> to pip-install the package, then fill in the five "
+            "database fields (also from the wiki) and click Save &amp; Test. "
+            "The values are written to <code>~/.awe/Environment.cfg</code>; "
+            "<code>data_server</code>, port and protocol are inherited from the "
+            "MetisWISE-packaged default (<code>metis-ds.hpc.rug.nl:8013</code>, "
+            "https)."
         )
-        desc0.setWordWrap(True)
-        desc0.setTextFormat(Qt.TextFormat.RichText)
-        lay0.addWidget(desc0)
+        desc.setWordWrap(True)
+        desc.setTextFormat(Qt.TextFormat.RichText)
+        desc.setOpenExternalLinks(True)
+        lay.addWidget(desc)
 
-        # -- 1. MetisWISE --
-        mw_grp = QGroupBox("1. MetisWISE")
+        # -- 1. MetisWISE install --
+        mw_grp = QGroupBox("1. Install MetisWISE")
         mw_lay = QVBoxLayout(mw_grp)
-        mw_desc = QLabel(
-            "Install the <b>MetisWISE</b> Python package (OmegaCEN "
-            "credentials required).  These credentials are also used "
-            "to build the archive container image."
-        )
-        mw_desc.setWordWrap(True)
-        mw_lay.addWidget(mw_desc)
-        cred_row = QWidget()
-        cred_h = QHBoxLayout(cred_row)
-        cred_h.setContentsMargins(0, 0, 0, 0)
-        cred_h.addWidget(QLabel("OmegaCEN credentials (user:pass):"))
+        cred_row = QHBoxLayout()
+        cred_row.addWidget(QLabel("OmegaCEN credentials (user:pass):"))
         self._cred_edit = QLineEdit()
         self._cred_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._cred_edit.setPlaceholderText("username:password")
-        cred_h.addWidget(self._cred_edit)
-        mw_lay.addWidget(cred_row)
+        cred_row.addWidget(self._cred_edit)
+        mw_lay.addLayout(cred_row)
         mw_btn_row = QHBoxLayout()
         self._install_btn = QPushButton("Install MetisWISE")
         self._install_btn.setProperty("role", "success")
@@ -968,128 +896,82 @@ class ArchiveTab(QWidget):
         mw_btn_row.addWidget(self._mw_status)
         mw_btn_row.addStretch()
         mw_lay.addLayout(mw_btn_row)
-        lay0.addWidget(mw_grp)
+        lay.addWidget(mw_grp)
 
-        # -- 2. Podman --
-        pm_grp = QGroupBox("2. Podman")
-        pm_lay = QVBoxLayout(pm_grp)
-        pm_btn_row = QHBoxLayout()
-        self._podman_install_btn = QPushButton("Install Podman")
-        self._podman_install_btn.setProperty("role", "success")
-        self._podman_install_btn.setMinimumHeight(32)
-        self._podman_install_btn.setMaximumWidth(200)
-        self._podman_install_btn.clicked.connect(self._on_install_podman)
-        pm_btn_row.addWidget(self._podman_install_btn)
-        self._pm_status = QLabel()
-        pm_btn_row.addWidget(self._pm_status)
-        pm_btn_row.addStretch()
-        pm_lay.addLayout(pm_btn_row)
-        lay0.addWidget(pm_grp)
-
-        # -- 3. Local database --
-        db_grp = QGroupBox("3. Local Database")
-        db_lay = QVBoxLayout(db_grp)
-        db_desc = QLabel(
-            "Build the archive container image and start the local "
-            "PostgreSQL + dataserver pod.  Uses the OmegaCEN credentials "
-            "above for the container build."
+        # -- 2. Remote archive credentials --
+        cfg_grp = QGroupBox("2. Remote archive credentials")
+        cfg_lay = QVBoxLayout(cfg_grp)
+        cfg_desc = QLabel(
+            "These values are written under <code>[global]</code> in "
+            "<code>~/.awe/Environment.cfg</code>."
         )
-        db_desc.setWordWrap(True)
-        db_lay.addWidget(db_desc)
-        db_btn_row = QHBoxLayout()
-        self._build_start_btn = QPushButton("Build Image && Start Database")
-        self._build_start_btn.setProperty("role", "success")
-        self._build_start_btn.setMinimumHeight(32)
-        self._build_start_btn.setMaximumWidth(280)
-        self._build_start_btn.clicked.connect(self._on_build_start_db)
-        db_btn_row.addWidget(self._build_start_btn)
-        self._stop_db_btn0 = QPushButton("Stop Database")
-        self._stop_db_btn0.setProperty("role", "danger")
-        self._stop_db_btn0.setMinimumHeight(32)
-        self._stop_db_btn0.setMaximumWidth(160)
-        self._stop_db_btn0.clicked.connect(self._on_stop_db)
-        db_btn_row.addWidget(self._stop_db_btn0)
-        self._db_status = QLabel()
-        db_btn_row.addWidget(self._db_status)
-        db_btn_row.addStretch()
-        db_lay.addLayout(db_btn_row)
-        lay0.addWidget(db_grp)
+        cfg_desc.setWordWrap(True)
+        cfg_desc.setTextFormat(Qt.TextFormat.RichText)
+        cfg_lay.addWidget(cfg_desc)
 
-        # -- Log view --
-        self._log0 = QTextEdit()
-        self._log0.setReadOnly(True)
-        self._log0.setFont(QFont("Monospace", 9))
-        lay0.addWidget(self._log0, stretch=1)
-        self._stack.addWidget(page0)
+        self._cfg_edits: dict[str, QLineEdit] = {}
+        labels = {
+            "database_user":            "database_user:",
+            "database_password":        "database_password:",
+            "project":                  "project:",
+            "database_tablespacename":  "database_tablespacename:",
+            "database_name":            "database_name:",
+        }
+        for key in self._CFG_FIELD_ORDER:
+            row = QHBoxLayout()
+            label = QLabel(labels[key])
+            label.setMinimumWidth(200)
+            row.addWidget(label)
+            edit = QLineEdit()
+            if key == "database_password":
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+            edit.textChanged.connect(self._invalidate_connection)
+            row.addWidget(edit)
+            cfg_lay.addLayout(row)
+            self._cfg_edits[key] = edit
 
-        # ── Page 1: Archive operations ──────────────────────────────────────
-        page1 = QWidget()
-        lay1 = QVBoxLayout(page1)
-        lay1.setSpacing(10)
+        btn_row = QHBoxLayout()
+        self._save_test_btn = QPushButton("Save && Test Connection")
+        self._save_test_btn.setProperty("role", "success")
+        self._save_test_btn.setMinimumHeight(32)
+        self._save_test_btn.setMaximumWidth(240)
+        self._save_test_btn.clicked.connect(self._on_save_and_test)
+        btn_row.addWidget(self._save_test_btn)
+        self._cfg_status = QLabel()
+        btn_row.addWidget(self._cfg_status)
+        btn_row.addStretch()
+        cfg_lay.addLayout(btn_row)
+        lay.addWidget(cfg_grp)
 
-        desc1 = QLabel(
-            "<b>Local Archive</b><br><br>"
-            "Upload and download FITS files from the local archive "
-            "database.  The default credentials (<code>AWTEST</code> / "
-            "<code>lmno</code>) are created during database setup."
+        # -- 3. Continue --
+        cont_row = QHBoxLayout()
+        cont_row.addStretch()
+        self._continue_btn = QPushButton("Continue to Query / Download  →")
+        self._continue_btn.setMinimumHeight(32)
+        self._continue_btn.setMaximumWidth(280)
+        self._continue_btn.clicked.connect(
+            lambda: self._stack.setCurrentIndex(1),
         )
-        desc1.setWordWrap(True)
-        desc1.setTextFormat(Qt.TextFormat.RichText)
-        lay1.addWidget(desc1)
+        self._continue_btn.setEnabled(False)
+        cont_row.addWidget(self._continue_btn)
+        lay.addLayout(cont_row)
 
-        # -- Database credentials --
-        db_cred_grp = QGroupBox("Database Credentials")
-        db_cred_lay = QHBoxLayout(db_cred_grp)
-        db_cred_lay.addWidget(QLabel("Username:"))
-        self._db_user_edit = QLineEdit()
-        self._db_user_edit.setPlaceholderText("e.g. AWTEST")
-        self._db_user_edit.setMaximumWidth(160)
-        db_cred_lay.addWidget(self._db_user_edit)
-        db_cred_lay.addSpacing(12)
-        db_cred_lay.addWidget(QLabel("Password:"))
-        self._db_pass_edit = QLineEdit()
-        self._db_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._db_pass_edit.setMaximumWidth(160)
-        db_cred_lay.addWidget(self._db_pass_edit)
-        db_cred_lay.addSpacing(12)
-        self._connect_btn = QPushButton("Connect")
-        self._connect_btn.setProperty("role", "info")
-        self._connect_btn.setMinimumHeight(32)
-        self._connect_btn.clicked.connect(self._on_connect_db)
-        db_cred_lay.addWidget(self._connect_btn)
-        db_cred_lay.addStretch()
-        lay1.addWidget(db_cred_grp)
+        lay.addStretch()
+        return page
 
-        # -- Upload section --
-        up_grp = QGroupBox("Upload FITS to Archive")
-        up_lay = QVBoxLayout(up_grp)
-        up_row = QHBoxLayout()
-        self._upload_list = QListWidget()
-        self._upload_list.setMaximumHeight(100)
-        up_row.addWidget(self._upload_list)
-        up_btns = QVBoxLayout()
-        add_btn = QPushButton("Add Files…")
-        add_btn.setProperty("role", "info")
-        add_btn.clicked.connect(self._on_add_upload_files)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setProperty("role", "danger")
-        clear_btn.clicked.connect(self._upload_list.clear)
-        up_btns.addWidget(add_btn)
-        up_btns.addWidget(clear_btn)
-        up_btns.addStretch()
-        up_row.addLayout(up_btns)
-        up_lay.addLayout(up_row)
-        self._upload_btn = QPushButton("Upload to Archive")
-        self._upload_btn.setProperty("role", "success")
-        self._upload_btn.setMinimumHeight(32)
-        self._upload_btn.setMaximumWidth(200)
-        self._upload_btn.clicked.connect(self._on_upload)
-        up_lay.addWidget(self._upload_btn)
-        lay1.addWidget(up_grp)
+    def _build_page_query(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
 
-        # -- Download section --
-        dl_grp = QGroupBox("Download from Archive")
-        dl_lay = QVBoxLayout(dl_grp)
+        desc = QLabel(
+            "<b>Query &amp; download from the remote archive</b><br><br>"
+            "Pick a category (raw classification tag or master PRO.CATG), "
+            "hit <i>Search</i>, then select one or more files to retrieve."
+        )
+        desc.setWordWrap(True)
+        desc.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(desc)
 
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Category:"))
@@ -1117,12 +999,14 @@ class ArchiveTab(QWidget):
         self._refresh_btn.setMinimumHeight(32)
         self._refresh_btn.clicked.connect(self._on_refresh_archive)
         filter_row.addWidget(self._refresh_btn)
-        dl_lay.addLayout(filter_row)
+        lay.addLayout(filter_row)
 
         self._archive_list = QListWidget()
-        self._archive_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self._archive_list.setMaximumHeight(120)
-        dl_lay.addWidget(self._archive_list)
+        self._archive_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection,
+        )
+        self._archive_list.setMinimumHeight(200)
+        lay.addWidget(self._archive_list, stretch=1)
 
         dl_row = QHBoxLayout()
         self._download_btn = QPushButton("Download Selected")
@@ -1132,46 +1016,23 @@ class ArchiveTab(QWidget):
         self._download_btn.clicked.connect(self._on_download)
         dl_row.addWidget(self._download_btn)
         dl_row.addStretch()
-        dl_lay.addLayout(dl_row)
-        lay1.addWidget(dl_grp)
-
-        # -- Stop database + log view --
-        bottom_row = QHBoxLayout()
-        self._stop_db_btn1 = QPushButton("Stop Database")
-        self._stop_db_btn1.setProperty("role", "danger")
-        self._stop_db_btn1.setMinimumHeight(32)
-        self._stop_db_btn1.setMaximumWidth(160)
-        self._stop_db_btn1.clicked.connect(self._on_stop_db)
-        bottom_row.addWidget(self._stop_db_btn1)
-        self._back_to_setup_btn = QPushButton("Back to Setup")
-        self._back_to_setup_btn.setMinimumHeight(32)
-        self._back_to_setup_btn.setMaximumWidth(140)
-        self._back_to_setup_btn.clicked.connect(lambda: self._stack.setCurrentIndex(0))
-        bottom_row.addWidget(self._back_to_setup_btn)
-        bottom_row.addStretch()
-        lay1.addLayout(bottom_row)
-
-        self._log1 = QTextEdit()
-        self._log1.setReadOnly(True)
-        self._log1.setFont(QFont("Monospace", 9))
-        lay1.addWidget(self._log1, stretch=1)
-        self._stack.addWidget(page1)
-
-    # ── State management ────────────────────────────────────────────────────
-
-    def _check_state(self) -> None:
-        """Update status labels and determine which page to show."""
-        from archive import (
-            metiswise_available, podman_available,
-            archive_pod_running, check_stale_environment_cfg,
+        self._back_btn = QPushButton("←  Back to setup")
+        self._back_btn.setMinimumHeight(32)
+        self._back_btn.setMaximumWidth(160)
+        self._back_btn.clicked.connect(
+            lambda: self._stack.setCurrentIndex(0),
         )
+        dl_row.addWidget(self._back_btn)
+        lay.addLayout(dl_row)
 
-        mw_ok = metiswise_available()
-        pm_ok = podman_available()
-        pod_ok = archive_pod_running()
+        return page
 
-        # Status labels on page 0.
-        if mw_ok:
+    # ── State helpers ───────────────────────────────────────────────────────
+
+    def _refresh_install_status(self) -> None:
+        """Update the MetisWISE status label + Continue button gate."""
+        from archive import metiswise_available
+        if metiswise_available():
             self._mw_status.setText("Installed")
             self._mw_status.setStyleSheet("color: green; font-weight: bold;")
             self._install_btn.setEnabled(False)
@@ -1179,42 +1040,20 @@ class ArchiveTab(QWidget):
             self._mw_status.setText("Not installed")
             self._mw_status.setStyleSheet("color: red;")
             self._install_btn.setEnabled(True)
+        self._update_continue_button()
 
-        if pm_ok:
-            self._pm_status.setText("Installed")
-            self._pm_status.setStyleSheet("color: green; font-weight: bold;")
-            self._podman_install_btn.setEnabled(False)
-        else:
-            self._pm_status.setText("Not found")
-            self._pm_status.setStyleSheet("color: red;")
-            self._podman_install_btn.setEnabled(True)
+    def _update_continue_button(self) -> None:
+        from archive import metiswise_available
+        self._continue_btn.setEnabled(
+            metiswise_available() and self._connection_ok,
+        )
 
-        if pod_ok:
-            self._db_status.setText("Running")
-            self._db_status.setStyleSheet("color: green; font-weight: bold;")
-            self._stop_db_btn0.setEnabled(True)
-        else:
-            self._db_status.setText("Stopped")
-            self._db_status.setStyleSheet("color: gray;")
-            self._stop_db_btn0.setEnabled(False)
-
-        # Build/start button requires MetisWISE + Podman.
-        self._build_start_btn.setEnabled(mw_ok and pm_ok)
-
-        # Show page 1 only when all prerequisites are met.
-        if mw_ok and pm_ok and pod_ok:
-            self._stack.setCurrentIndex(1)
-            # Write saved DB credentials pointing to localhost.
-            user = self._db_user_edit.text().strip()
-            pw = self._db_pass_edit.text().strip()
-            if user and pw:
-                from archive import write_db_credentials
-                write_db_credentials(user, pw, host="localhost")
-            warning = check_stale_environment_cfg()
-            if warning:
-                log_append(self._log1, warning + "\n", "orange")
-        else:
-            self._stack.setCurrentIndex(0)
+    def _invalidate_connection(self) -> None:
+        """Any edit to the 5 fields invalidates the last test-connection result."""
+        if self._connection_ok:
+            self._connection_ok = False
+            self._cfg_status.setText("")
+            self._update_continue_button()
 
     # ── MetisWISE install ──────────────────────────────────────────────────
 
@@ -1223,130 +1062,59 @@ class ArchiveTab(QWidget):
         if not creds:
             QMessageBox.warning(
                 self, "Missing credentials",
-                "Enter OmegaCEN credentials (username:password) to install MetisWISE.",
+                "Enter OmegaCEN credentials (username:password) "
+                "to install MetisWISE.",
             )
             return
-        self._log0.clear()
+        self._log.clear()
         self._install_btn.setEnabled(False)
         self._worker = MetisWISEInstallWorker(creds)
-        self._worker.log.connect(lambda t, c: log_append(self._log0, t, c))
+        self._worker.log.connect(lambda t, c: log_append(self._log, t, c))
         self._worker.done.connect(self._on_metiswise_installed)
         self._worker.start()
 
-    def _on_metiswise_installed(self, success: bool) -> None:
-        self._install_btn.setEnabled(True)
-        if success:
-            self._check_state()
-
-    # ── Podman install ─────────────────────────────────────────────────────
-
-    def _on_install_podman(self) -> None:
-        self._log0.clear()
-        self._podman_install_btn.setEnabled(False)
-        self._worker = PodmanInstallWorker()
-        self._worker.log.connect(lambda t, c: log_append(self._log0, t, c))
-        self._worker.done.connect(self._on_podman_installed)
-        self._worker.start()
-
-    def _on_podman_installed(self, success: bool) -> None:
-        self._podman_install_btn.setEnabled(True)
-        if success:
-            self._check_state()
-
-    # ── Build & start database ─────────────────────────────────────────────
-
-    def _on_build_start_db(self) -> None:
-        creds = self._cred_edit.text().strip()
-        if not creds:
-            QMessageBox.warning(
-                self, "Missing credentials",
-                "Enter OmegaCEN credentials — they are needed to build "
-                "the archive container image.",
-            )
-            return
-        self._log0.clear()
-        self._build_start_btn.setEnabled(False)
-        self._worker = BuildStartDBWorker(creds)
-        self._worker.log.connect(lambda t, c: log_append(self._log0, t, c))
-        self._worker.done.connect(self._on_db_started)
-        self._worker.start()
-
-    def _on_db_started(self, success: bool) -> None:
-        self._build_start_btn.setEnabled(True)
-        if success:
-            self._save_settings()
-            self._check_state()
-
-    # ── Stop database ──────────────────────────────────────────────────────
-
-    def _on_stop_db(self) -> None:
-        log_view = self._log1 if self._stack.currentIndex() == 1 else self._log0
-        self._stop_db_btn0.setEnabled(False)
-        self._stop_db_btn1.setEnabled(False)
-        self._worker = StopDBWorker()
-        self._worker.log.connect(lambda t, c: log_append(log_view, t, c))
-        self._worker.done.connect(self._on_db_stopped)
-        self._worker.start()
-
-    def _on_db_stopped(self, _success: bool) -> None:
-        self._check_state()
-
-    # ── Database credentials ───────────────────────────────────────────────
-
-    def _on_connect_db(self) -> None:
-        user = self._db_user_edit.text().strip()
-        pw = self._db_pass_edit.text().strip()
-        if not user or not pw:
-            QMessageBox.warning(
-                self, "Missing credentials",
-                "Enter database username and password.",
-            )
-            return
-        from archive import write_db_credentials, reset_db_connection
-        cfg = write_db_credentials(user, pw, host="localhost")
-        reset_db_connection()
-        log_append(self._log1, f"Credentials written to {cfg}\n", "green")
-        log_append(self._log1, "Testing connection…\n", "cyan")
+    def _on_metiswise_installed(self, _success: bool) -> None:
         self._save_settings()
-        self._connect_btn.setEnabled(False)
-        self._worker = QueryWorker()  # quick "(all)" query to test connectivity
-        self._worker.log.connect(lambda t, c: log_append(self._log1, t, c))
-        self._worker.results.connect(
-            lambda items: log_append(
-                self._log1,
-                f"Connected — {len(items)} item(s) in archive.\n", "green",
+        self._refresh_install_status()
+
+    # ── Save & Test Connection ─────────────────────────────────────────────
+
+    def _on_save_and_test(self) -> None:
+        from archive import metiswise_available
+        if not metiswise_available():
+            QMessageBox.warning(
+                self, "MetisWISE not installed",
+                "Install MetisWISE first — the test connection needs it.",
             )
-        )
-        self._worker.done.connect(lambda _ok: self._connect_btn.setEnabled(True))
-        self._worker.start()
-
-    # ── Upload ──────────────────────────────────────────────────────────────
-
-    def _on_add_upload_files(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select FITS files", str(REPO_ROOT), "FITS files (*.fits)",
-        )
-        existing = {
-            self._upload_list.item(i).text()
-            for i in range(self._upload_list.count())
-        }
-        for f in files:
-            if f not in existing:
-                self._upload_list.addItem(f)
-
-    def _on_upload(self) -> None:
-        if self._upload_list.count() == 0:
-            QMessageBox.warning(self, "No files", "Add FITS files to upload.")
             return
-        files = [
-            Path(self._upload_list.item(i).text())
-            for i in range(self._upload_list.count())
-        ]
-        self._upload_btn.setEnabled(False)
-        self._worker = UploadWorker(files)
-        self._worker.log.connect(lambda t, c: log_append(self._log1, t, c))
-        self._worker.done.connect(lambda _ok: self._upload_btn.setEnabled(True))
+        fields = {k: e.text().strip() for k, e in self._cfg_edits.items()}
+        missing = [k for k, v in fields.items() if not v]
+        if missing:
+            QMessageBox.warning(
+                self, "Missing fields",
+                "Fill in all five credential fields:\n  "
+                + "\n  ".join(missing),
+            )
+            return
+        self._save_test_btn.setEnabled(False)
+        self._cfg_status.setText("Testing…")
+        self._cfg_status.setStyleSheet("color: gray;")
+        self._worker = TestConnectionWorker(fields)
+        self._worker.log.connect(lambda t, c: log_append(self._log, t, c))
+        self._worker.done.connect(self._on_test_connection_done)
         self._worker.start()
+
+    def _on_test_connection_done(self, success: bool) -> None:
+        self._save_test_btn.setEnabled(True)
+        self._connection_ok = success
+        if success:
+            self._cfg_status.setText("Connected")
+            self._cfg_status.setStyleSheet("color: green; font-weight: bold;")
+            self._save_settings()
+        else:
+            self._cfg_status.setText("Failed — see log")
+            self._cfg_status.setStyleSheet("color: red;")
+        self._update_continue_button()
 
     # ── Download ────────────────────────────────────────────────────────────
 
@@ -1356,11 +1124,11 @@ class ArchiveTab(QWidget):
         catg_text = self._catg_combo.currentText().strip()
         category = None if catg_text in ("", "(all)") else catg_text
         if category:
-            log_append(self._log1, f"Querying archive for {category}…\n", "cyan")
+            log_append(self._log, f"Querying archive for {category}…\n", "cyan")
         else:
-            log_append(self._log1, "Querying archive (all items)…\n", "cyan")
+            log_append(self._log, "Querying archive (all items)…\n", "cyan")
         self._worker = QueryWorker(category=category)
-        self._worker.log.connect(lambda t, c: log_append(self._log1, t, c))
+        self._worker.log.connect(lambda t, c: log_append(self._log, t, c))
         self._worker.results.connect(self._on_query_results)
         self._worker.done.connect(lambda _ok: self._refresh_btn.setEnabled(True))
         self._worker.start()
@@ -1388,13 +1156,15 @@ class ArchiveTab(QWidget):
         if not selected:
             QMessageBox.warning(self, "No selection", "Select files to download.")
             return
-        dest = QFileDialog.getExistingDirectory(self, "Download destination", str(REPO_ROOT))
+        dest = QFileDialog.getExistingDirectory(
+            self, "Download destination", str(REPO_ROOT),
+        )
         if not dest:
             return
         filenames = [item.text().split("  [")[0] for item in selected]
         self._download_btn.setEnabled(False)
         self._worker = DownloadWorker(filenames, Path(dest))
-        self._worker.log.connect(lambda t, c: log_append(self._log1, t, c))
+        self._worker.log.connect(lambda t, c: log_append(self._log, t, c))
         self._worker.done.connect(lambda _ok: self._download_btn.setEnabled(True))
         self._worker.start()
 
@@ -1402,17 +1172,36 @@ class ArchiveTab(QWidget):
 
     def _load_settings(self) -> None:
         self._cred_edit.setText(self._settings.value("archive_cred", ""))
-        self._db_user_edit.setText(
-            self._settings.value("archive_db_user", "AWTEST")
-        )
-        self._db_pass_edit.setText(
-            self._settings.value("archive_db_pass", "lmno")
-        )
+
+        # Pre-populate from ~/.awe/Environment.cfg if present; fall back to
+        # any values previously saved via QSettings.
+        from archive import read_env_cfg
+        existing = read_env_cfg()
+        for key, edit in self._cfg_edits.items():
+            value = existing.get(key, "") or self._settings.value(
+                f"archive_cfg_{key}", "",
+            )
+            edit.setText(value)
+
+        # One-shot migration from the old local-DB QSettings keys.
+        legacy_user = self._settings.value("archive_db_user", "")
+        legacy_pass = self._settings.value("archive_db_pass", "")
+        if legacy_user and not self._cfg_edits["database_user"].text():
+            self._cfg_edits["database_user"].setText(legacy_user)
+        if legacy_pass and not self._cfg_edits["database_password"].text():
+            self._cfg_edits["database_password"].setText(legacy_pass)
+        if legacy_user or legacy_pass:
+            self._settings.remove("archive_db_user")
+            self._settings.remove("archive_db_pass")
 
     def _save_settings(self) -> None:
         self._settings.setValue("archive_cred", self._cred_edit.text())
-        self._settings.setValue("archive_db_user", self._db_user_edit.text())
-        self._settings.setValue("archive_db_pass", self._db_pass_edit.text())
+        for key, edit in self._cfg_edits.items():
+            # Don't persist the password in QSettings — it already lives in
+            # ~/.awe/Environment.cfg once Save & Test has run.
+            if key == "database_password":
+                continue
+            self._settings.setValue(f"archive_cfg_{key}", edit.text())
 
 
 # ---------------------------------------------------------------------------

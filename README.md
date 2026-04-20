@@ -86,6 +86,27 @@ Re-running is safe — existing repositories are updated in place rather than re
 - **Bare-metal / ESO docs install** — choose runner `native`
 - **Pipeline container** (Docker / Podman) — choose runner `docker` or `podman` and supply the container name
 
+### Archive tab
+
+The Archive tab connects to the remote METIS AIT archive via the
+[MetisWISE](https://github.com/AstarVienna/MetisWISE) client. It has two pages:
+
+1. **Install & Configure** — paste the OmegaCEN credentials from the
+   [METIS wiki](https://metis.strw.leidenuniv.nl/wiki/doku.php?id=ait:archive)
+   and click **Install MetisWISE** to pip-install the package into the project
+   `.venv`. Then fill in the five `[global]` fields (`database_user`,
+   `database_password`, `project`, `database_tablespacename`, `database_name`)
+   and click **Save & Test Connection**. The values are written to
+   `~/.awe/Environment.cfg`; `data_server`, port and protocol are inherited
+   from the MetisWISE-packaged default (`metis-ds.hpc.rug.nl:8013`, https).
+
+2. **Query & Download** — filter by raw classification tag or master
+   `PRO.CATG`, click **Search**, select files and download them to a local
+   directory.
+
+To auto-pull missing master calibrations during a pipeline run, add
+`--auto-fetch-calibrations` to the Run tab's options (or the CLI).
+
 ### Run tab
 
 The Run tab wraps `src/run_metis.py` in a file-picker UI. All CLI options are exposed as form controls; runner-specific fields (container name, meta-package path) show and hide based on the selected runner.
@@ -206,6 +227,8 @@ python src/run_metis.py [OPTIONS] yaml1.yaml [yaml2.yaml ...]
 | `--meta-pkg PATH` | `.` (repo root) | Path to the pipeline environment directory (`metapkg` runner only). Falls back to `./pipeline/` then `./metis-meta-package/`. (env: `METIS_META_PKG`) |
 | `--simulations-dir PATH` | `./METIS_Simulations` (host) or `/home/metis/METIS_Simulations` (container) | Path to ScopeSim scripts (env: `METIS_SIMULATIONS_DIR`) |
 | `--inst-pkgs PATH` | see below | Path to ScopeSim instrument packages (Armazones, ELT, METIS). Defaults to `./inst_pkgs` for `metapkg`/`native`, and container-resolved `./inst_pkgs` for `docker`/`podman` (env: `METIS_INST_PKGS`) |
+| `--auto-fetch-calibrations` | off | Before running the pipeline, query the remote METIS archive (via MetisWISE) for any master calibrations the input set is missing and download them into the pipeline input directory. Requires MetisWISE to be installed and `~/.awe/Environment.cfg` to hold valid credentials — see the Archive tab. |
+| `--prefer-masters` | off | Set EDPS `association_preference` to `master_per_quality_level` for this run, preferring master calibrations over reduced raw data. |
 
 ### Runner modes
 
