@@ -221,11 +221,12 @@ def write_env_cfg(
     }
 
     cfg = env_cfg_path()
-    cfg.parent.mkdir(exist_ok=True)
+    cfg.parent.mkdir(mode=0o700, exist_ok=True)
 
     if not cfg.exists():
         lines = ["[global]"] + [f"{k} : {v}" for k, v in values.items()]
         cfg.write_text("\n".join(lines) + "\n")
+        os.chmod(cfg, 0o600)
         return cfg
 
     text = cfg.read_text()

@@ -1171,37 +1171,29 @@ class ArchiveTab(QWidget):
     # ── Settings ────────────────────────────────────────────────────────────
 
     def _load_settings(self) -> None:
-        self._cred_edit.setText(self._settings.value("archive_cred", ""))
+        # Scrub any archive fields previously persisted to QSettings
+        # (~/.config/METIS/TestRunner.conf) by older builds.
+        for stale in ("archive_cred",
+                      "archive_cfg_database_user",
+                      "archive_cfg_database_password",
+                      "archive_cfg_project",
+                      "archive_cfg_database_tablespacename",
+                      "archive_cfg_database_name",
+                      "archive_db_user",
+                      "archive_db_pass"):
+            self._settings.remove(stale)
 
-        # Pre-populate from ~/.awe/Environment.cfg if present; fall back to
-        # any values previously saved via QSettings.
+        # Pre-populate from ~/.awe/Environment.cfg if present.
         from archive import read_env_cfg
         existing = read_env_cfg()
         for key, edit in self._cfg_edits.items():
-            value = existing.get(key, "") or self._settings.value(
-                f"archive_cfg_{key}", "",
-            )
-            edit.setText(value)
-
-        # One-shot migration from the old local-DB QSettings keys.
-        legacy_user = self._settings.value("archive_db_user", "")
-        legacy_pass = self._settings.value("archive_db_pass", "")
-        if legacy_user and not self._cfg_edits["database_user"].text():
-            self._cfg_edits["database_user"].setText(legacy_user)
-        if legacy_pass and not self._cfg_edits["database_password"].text():
-            self._cfg_edits["database_password"].setText(legacy_pass)
-        if legacy_user or legacy_pass:
-            self._settings.remove("archive_db_user")
-            self._settings.remove("archive_db_pass")
+            edit.setText(existing.get(key, ""))
 
     def _save_settings(self) -> None:
-        self._settings.setValue("archive_cred", self._cred_edit.text())
-        for key, edit in self._cfg_edits.items():
-            # Don't persist the password in QSettings — it already lives in
-            # ~/.awe/Environment.cfg once Save & Test has run.
-            if key == "database_password":
-                continue
-            self._settings.setValue(f"archive_cfg_{key}", edit.text())
+        # No archive fields are persisted to QSettings. The DB fields
+        # live in ~/.awe/Environment.cfg after Save & Test; the OmegaCEN
+        # creds are kept in-memory only for this session.
+        return
 
 
 # ---------------------------------------------------------------------------
