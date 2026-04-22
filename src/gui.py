@@ -1424,7 +1424,8 @@ class RunTab(QWidget):
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Monospace", 9))
-        outer.addWidget(self.log_view, stretch=1)
+        self.log_view.setMinimumHeight(400)
+        outer.addWidget(self.log_view, stretch=2)
 
     # ── Output path info ─────────────────────────────────────────────────────
 
