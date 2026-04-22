@@ -20,9 +20,9 @@ from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QRadioButton, QSpinBox, QStackedWidget,
-    QTabBar, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit,
-    QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter,
+    QStackedWidget, QTabBar, QTableWidget, QTableWidgetItem, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 # ---------------------------------------------------------------------------
@@ -889,17 +889,22 @@ class ArchiveTab(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setSpacing(14)
         outer.setContentsMargins(20, 20, 20, 20)
 
         self._stack = QStackedWidget()
-        outer.addWidget(self._stack, stretch=1)
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setFont(QFont("Monospace", 9))
-        self._log.setMinimumHeight(140)
-        outer.addWidget(self._log, stretch=1)
+        self._log.setMinimumHeight(100)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self._stack)
+        splitter.addWidget(self._log)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
+        outer.addWidget(splitter)
 
         self._stack.addWidget(self._build_page_install())
         self._stack.addWidget(self._build_page_query())
@@ -1058,7 +1063,7 @@ class ArchiveTab(QWidget):
         self._archive_list.setSelectionMode(
             QListWidget.SelectionMode.ExtendedSelection,
         )
-        self._archive_list.setMinimumHeight(200)
+        self._archive_list.setMinimumHeight(120)
         lay.addWidget(self._archive_list, stretch=1)
 
         dl_row = QHBoxLayout()
@@ -1138,7 +1143,7 @@ class ArchiveTab(QWidget):
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self._stage_table.setMinimumHeight(220)
+        self._stage_table.setMinimumHeight(120)
         lay.addWidget(self._stage_table, stretch=1)
 
         action_row = QHBoxLayout()
@@ -1512,8 +1517,12 @@ class RunTab(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setSpacing(12)
         outer.setContentsMargins(20, 20, 20, 20)
+
+        top = QWidget()
+        top_lay = QVBoxLayout(top)
+        top_lay.setSpacing(12)
+        top_lay.setContentsMargins(0, 0, 0, 0)
 
         # ── YAML file list ──
         self.yaml_grp = QGroupBox("YAML Input Files")
@@ -1535,7 +1544,7 @@ class RunTab(QWidget):
         btn_col.addStretch()
         file_row.addLayout(btn_col)
         yaml_lay.addLayout(file_row)
-        outer.addWidget(self.yaml_grp)
+        top_lay.addWidget(self.yaml_grp)
 
         # ── Options ──
         opts_grp = QGroupBox("Options")
@@ -1680,7 +1689,7 @@ class RunTab(QWidget):
         self.inst_edit.setPlaceholderText(str(INST_PKGS))
         opts_lay.addWidget(_labeled("Instrument packages  (--inst-pkgs):", self.inst_edit, inst_browse))
 
-        outer.addWidget(opts_grp)
+        top_lay.addWidget(opts_grp)
 
         # ── Run / Stop ──
         run_row = QHBoxLayout()
@@ -1704,14 +1713,21 @@ class RunTab(QWidget):
         run_row.addWidget(self.stop_btn)
         run_row.addWidget(self.open_folder_btn)
         run_row.addStretch()
-        outer.addLayout(run_row)
+        top_lay.addLayout(run_row)
 
         # ── Output log ──
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Monospace", 9))
-        self.log_view.setMinimumHeight(400)
-        outer.addWidget(self.log_view, stretch=2)
+        self.log_view.setMinimumHeight(150)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(top)
+        splitter.addWidget(self.log_view)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
+        outer.addWidget(splitter)
 
     # ── Output path info ─────────────────────────────────────────────────────
 
@@ -2020,6 +2036,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_theme: str = "dark") -> None:
         super().__init__()
         self.setWindowTitle("METIS Test Runner")
+        self.setMinimumSize(600, 400)
         self.resize(1000, 900)
 
         self._current_theme = initial_theme

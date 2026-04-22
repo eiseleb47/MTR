@@ -22,29 +22,29 @@ DETLIN_GEO_RAW1:
     is_temp: 300
     wcu_temp: 300
 
-DETLIN_GEO_RAW2:
-  do.catg: DETLIN_GEO_RAW
-  mode: "wcu_img_n"
-  source:
-    name: empty_sky
-    kwargs: {}
-  properties:
-    dit: 2.0
-    ndit: 1
-    filter_name: "open"
-    nd_filter_name: "open"
-    catg: "CALIB"
-    tech: "IMAGE,N"
-    type: "DETLIN"
-    tplname: "METIS_img_n_cal_DetLin"
-    nObs: 2
-  wcu:
-    current_lamp: "bb"
-    current_fpmask: "open"
-    bb_aperture: 0.5
-    bb_temp: 800
-    is_temp: 300
-    wcu_temp: 300
+#DETLIN_GEO_RAW2:
+  # do.catg: DETLIN_GEO_RAW
+  # mode: "wcu_img_n"
+  # source:
+  #   name: empty_sky
+  #   kwargs: {}
+  # properties:
+  #   dit: 2.0
+  #   ndit: 1
+  #   filter_name: "open"
+  #   nd_filter_name: "open"
+  #   catg: "CALIB"
+  #   tech: "IMAGE,N"
+  #   type: "DETLIN"
+  #   tplname: "METIS_img_n_cal_DetLin"
+  #   nObs: 2
+  # wcu:
+  #   current_lamp: "bb"
+  #   current_fpmask: "open"
+  #   bb_aperture: 0.5
+  #   bb_temp: 800
+  #   is_temp: 300
+  #   wcu_temp: 300
 
 DARK_GEO_RAW:
   do.catg: DARK_GEO_RAW
